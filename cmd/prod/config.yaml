@@ -1,0 +1,34 @@
+# This file is embedded directly into the application binary at compile time.
+# It serves as the default configuration, primarily for local development.
+# For production, a CI/CD pipeline should replace this file with a production-specific version before building.
+
+project_id: "gemini-power-test"
+run_mode: "local"
+
+api_port: "8082"
+websocket_port: "8085"
+
+# Point this to your locally running node-identity-service
+identity_service_url: "http://localhost:3000"
+
+cors:
+  allowed_origins:
+    - "http://localhost:4200" # Angular default
+    - "http://localhost:3000" # React default
+    - "http://localhost:5173" # Vite default
+  role: "admin"
+
+presence_cache:
+  type: "firestore"
+  firestore:
+    collection_name: "presence"
+
+# Google Cloud Pub/Sub Topics and Subscriptions.
+ingress_topic_id: "ingress-topic"
+ingress_subscription_id: "ingress-sub"
+ingress_topic_dlq_id: "ingress-topic-dlq"
+delivery_topic_id: "delivery-notifications"
+push_notifications_topic_id: "push-notifications"
+
+# Google Cloud requires a minimum value of 24 hours for ephemeral subscriptions.
+delivery_bus_sub_expiration: "24h"
