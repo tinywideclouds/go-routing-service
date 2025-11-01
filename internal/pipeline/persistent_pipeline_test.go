@@ -2,11 +2,8 @@
 
 /*
 File: internal/pipeline/persistent_pipeline_test.go
-Description: REFACTORED to fix all compilation errors.
-- Uses new 'secure.SecureEnvelope' and 'urn' types.
-- Uses 'messagepipeline.NewStreamingService'.
-- Adds local 'mockTokenFetcher' and 'mockPushNotifier' helpers.
-- Correctly asserts the 'storedMessage' struct in Firestore.
+Description: REFACTORED to test the full "cold path" pipeline
+using the new 'CompositeMessageQueue' and 'ServiceDependencies'.
 */
 package pipeline_test
 
@@ -28,23 +25,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
-	"github.com/tinywideclouds/go-routing-service/internal/queue"
+	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue" // NEW
+	"github.com/tinywideclouds/go-routing-service/internal/queue"                  // NEW
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	routingv1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
-
-	// REFACTORED: Use new generated proto types
-	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 )
 
 // --- Test Helpers ---
 
-// NEW: Added mock for DeviceTokenFetcher
+// REFACTORED: Use the mock from the processor test
 type mockTokenFetcher struct {
 	mock.Mock
 }
@@ -57,21 +54,49 @@ func (m *mockTokenFetcher) Fetch(ctx context.Context, key urn.URN) ([]routing.De
 	}
 	return result, args.Error(1)
 }
-
 func (m *mockTokenFetcher) Close() error {
 	args := m.Called()
 	return args.Error(0)
 }
 
-// NEW: This is the struct we now store in Firestore
+// NEW: We only need to mock the HotQueue, as ColdQueue is what we're testing.
+type mockHotQueue struct {
+	mock.Mock
+}
+
+func (m *mockHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, envelope)
+	return args.Error(0)
+}
+func (m *mockHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routingv1.QueuedMessage, error) {
+	args := m.Called(ctx, userURN, limit)
+	return nil, args.Error(1)
+}
+func (m *mockHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
+	args := m.Called(ctx, userURN, messageIDs)
+	return args.Error(0)
+}
+func (m *mockHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, destination queue.ColdQueue) error {
+	args := m.Called(ctx, userURN, destination)
+	return args.Error(0)
+}
+
+type mockPPushNotifier struct {
+	mock.Mock
+}
+
+func (m *mockPPushNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, tokens, envelope)
+	return args.Error(0)
+}
+
+// This is the struct *actually* stored by FirestoreColdQueue
 type storedMessageForTest struct {
 	QueuedAt time.Time                  `firestore:"queued_at"`
 	Envelope *securev1.SecureEnvelopePb `firestore:"envelope"`
 }
 
 // TestPersistentPipeline_Integration validates the full "offline" path.
-// It publishes a message to the ingress topic and verifies that it is
-// processed and correctly stored in Firestore.
 func TestPersistentPipeline_Integration(t *testing.T) {
 	// 1. Arrange: Set up emulators
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -93,27 +118,36 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 
 	// 3. Arrange: Create Dependencies
 	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]() // User is offline
-	store, err := queue.NewFirestoreStore(fsClient, logger)
+
+	// --- REFACTORED: Use new CompositeMessageQueue ---
+	const coldCollection = "test-cold-queue"
+	store, err := fsqueue.NewFirestoreColdQueue(fsClient, coldCollection, logger) // Real ColdQueue
 	require.NoError(t, err)
+
+	mockHot := new(mockHotQueue) // Mocked HotQueue
+
+	messageQueue, err := queue.NewCompositeMessageQueue(mockHot, store, logger) // Composite
+	require.NoError(t, err)
+	// --- END REFACTOR ---
 
 	tokenFetcher := new(mockTokenFetcher)
 	tokenFetcher.On("Fetch", mock.Anything, mock.Anything).Return([]routing.DeviceToken{}, nil) // No tokens
 
-	pushNotifier := new(mockPushNotifier) // Will not be called
+	pushNotifier := new(mockPPushNotifier) // Will not be called
 
-	deps := &routing.Dependencies{
+	deps := &routing.ServiceDependencies{
 		PresenceCache:      presenceCache,
-		MessageStore:       store,
+		MessageQueue:       messageQueue, // Use new composite queue
 		DeviceTokenFetcher: tokenFetcher,
 		PushNotifier:       pushNotifier,
-		// DeliveryProducer not needed for offline path
+		// DELETED: DeliveryProducer
 	}
 
 	// 4. Arrange: Create the REAL pipeline service
 	ingressTopicID := "ingress-topic-" + runID
 	ingestSubID := "ingress-sub-" + runID
 	createPubsubResources(t, ctx, psClient, projectID, ingressTopicID, ingestSubID)
-	// REFACTORED: Use NewStreamingService and its config
+
 	cfg := &config.AppConfig{NumPipelineWorkers: 1}
 	processor := pipeline.NewRoutingProcessor(deps, cfg, logger)
 	consumer, err := messagepipeline.NewGooglePubsubConsumer(
@@ -131,7 +165,6 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// 5. Arrange: Create test data
-	// REFACTORED: Use new "dumb" envelope and new URN types
 	recipientURN, _ := urn.Parse("urn:sm:user:test-offline-user")
 	originalEnvelope := &secure.SecureEnvelope{
 		RecipientID:   recipientURN,
@@ -148,30 +181,26 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 		_ = streamingService.Start(pipelineCtx)
 	}()
 
-	// Give the service a moment to start its workers
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // Give service a moment to start
 
 	ingestPublisher := psClient.Publisher(ingressTopicID)
-
-	// Publish the raw payload
 	_, err = ingestPublisher.Publish(ctx, &pubsub.Message{Data: originalPayload}).Get(ctx)
 	require.NoError(t, err, "Failed to publish test message")
 
 	// 7. Assert: Check Firestore for the stored message
-	// The pipeline should process and store the message.
+	// The pipeline should process and store the message in the COLD queue
 	require.Eventually(t, func() bool {
-		docs, err := fsClient.Collection("user-messages").Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
+		docs, err := fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
 		return err == nil && len(docs) == 1
 	}, 10*time.Second, 100*time.Millisecond, "Message was not stored in Firestore")
 
 	// 8. Final Verification: Retrieve the message and assert data integrity.
-	docs, err := fsClient.Collection("user-messages").Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
+	docs, err := fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
 	require.NoError(t, err)
-	var storedData storedMessageForTest // REFACTORED: Check for the stored wrapper
+	var storedData storedMessageForTest
 	err = docs[0].DataTo(&storedData)
 	require.NoError(t, err)
 
-	// REFACTORED: Check the envelope *inside* the wrapper
 	storedEnvelope, err := secure.FromProto(storedData.Envelope)
 	require.NoError(t, err)
 

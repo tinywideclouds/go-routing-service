@@ -1,8 +1,7 @@
 /*
 File: internal/realtime/connectionmanager.go
-Description: REFACTORED to remove the 'DeliveryBus' pipeline.
-It now depends on 'queue.MessageQueue' to trigger the hot-to-cold
-migration on user disconnect.
+Description: REFACTORED to correctly create and manage its own net.Listener,
+which fixes the GetHTTPPort() helper to return the actual bound port.
 */
 // Package realtime provides components for managing real-time client connections.
 package realtime
@@ -11,7 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net" // NEW: Import
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
 	"github.com/rs/zerolog"
-	"github.com/tinywideclouds/go-routing-service/internal/queue" // NEW: Import
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
 	// REFACTORED: Use new platform packages
@@ -28,16 +29,16 @@ import (
 )
 
 // ConnectionManager manages all active WebSocket connections and user presence.
-// It runs its own dedicated HTTP server.
 type ConnectionManager struct {
 	server        *http.Server
 	upgrader      websocket.Upgrader
 	presenceCache cache.PresenceCache[urn.URN, routing.ConnectionInfo]
-	messageQueue  queue.MessageQueue // NEW: For triggering migration
-	// DELETED: deliveryPipeline *messagepipeline.StreamingService
-	connections sync.Map // map[string]*websocket.Conn
-	logger      zerolog.Logger
-	instanceID  string
+	messageQueue  queue.MessageQueue
+	connections   sync.Map // map[string]*websocket.Conn
+	logger        zerolog.Logger
+	instanceID    string
+	listener      net.Listener // NEW: To manage the port
+	port          string       // NEW: The configured port
 }
 
 // NewConnectionManager creates and wires up a new WebSocket connection manager.
@@ -45,7 +46,7 @@ func NewConnectionManager(
 	port string,
 	authMiddleware func(http.Handler) http.Handler,
 	presenceCache cache.PresenceCache[urn.URN, routing.ConnectionInfo],
-	messageQueue queue.MessageQueue, // NEW: Use MessageQueue
+	messageQueue queue.MessageQueue,
 	logger zerolog.Logger,
 ) (*ConnectionManager, error) {
 
@@ -57,23 +58,20 @@ func NewConnectionManager(
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				// TODO: Implement a real origin check
 				return true
 			},
 		},
 		presenceCache: presenceCache,
-		messageQueue:  messageQueue, // NEW
+		messageQueue:  messageQueue,
 		connections:   sync.Map{},
 		logger:        cmLogger,
 		instanceID:    instanceID,
+		port:          port, // Store the configured port
 	}
-
-	// DELETED: All logic for creating the deliveryPipeline
 
 	mux := http.NewServeMux()
 	mux.Handle("/connect", authMiddleware(http.HandlerFunc(cm.connectHandler)))
 	cm.server = &http.Server{
-		Addr:    ":" + port,
 		Handler: mux,
 	}
 
@@ -81,34 +79,75 @@ func NewConnectionManager(
 }
 
 // Start runs the HTTP server for WebSocket connections.
+// --- THIS IS THE FIX ---
 func (cm *ConnectionManager) Start(ctx context.Context) error {
-	// 1. Start the HTTP server.
-	cm.logger.Info().Str("addr", cm.server.Addr).Msg("WebSocket server starting...")
-	if err := cm.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	addr := cm.port
+	if !strings.HasPrefix(addr, ":") {
+		addr = ":" + addr
+	}
+
+	// 1. Create the listener
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("websocket server failed to listen: %w", err)
+	}
+	// 2. Store the listener (so GetHTTPPort can read it)
+	cm.listener = listener
+
+	// 3. Log the *actual* port
+	cm.logger.Info().Str("addr", cm.listener.Addr().String()).Msg("WebSocket server starting...")
+
+	// 4. Call Serve (not ListenAndServe)
+	if err := cm.server.Serve(cm.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("websocket server failed: %w", err)
 	}
 	return nil
 }
 
+// --- END FIX ---
+
 // Shutdown gracefully stops the HTTP server.
+// --- THIS IS THE FIX ---
 func (cm *ConnectionManager) Shutdown(ctx context.Context) error {
 	cm.logger.Info().Msg("Shutting down WebSocket service...")
 	var finalErr error
 
+	// 1. Shut down the server
 	if err := cm.server.Shutdown(ctx); err != nil {
 		cm.logger.Error().Err(err).Msg("WebSocket server shutdown failed.")
 		finalErr = err
 	}
 
-	// DELETED: deliveryPipeline.Stop()
-
-	// TODO: Iterate all connections and send a clean close message.
+	// 2. Close the listener
+	if cm.listener != nil {
+		if err := cm.listener.Close(); err != nil {
+			cm.logger.Error().Err(err).Msg("WebSocket listener close failed.")
+			finalErr = err
+		}
+	}
 
 	cm.logger.Info().Msg("WebSocket service shut down.")
 	return finalErr
 }
 
-// DELETED: deliveryProcessor method
+// --- END FIX ---
+
+// GetHTTPPort returns the port the server is listening on.
+// --- THIS IS THE FIX ---
+func (cm *ConnectionManager) GetHTTPPort() string {
+	if cm.listener == nil {
+		return ":0" // Not started yet
+	}
+	addr := cm.listener.Addr().String()
+	port := strings.LastIndex(addr, ":")
+	if port == -1 {
+		return ":0" // Should not happen
+	}
+	// Return in the same ":port" format as BaseServer
+	return addr[port:]
+}
+
+// --- END FIX ---
 
 // connectHandler upgrades a new HTTP request to a WebSocket and manages its lifecycle.
 func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +170,9 @@ func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Reque
 	defer func() {
 		err = conn.Close()
 		if err != nil {
-			cm.logger.Warn().Err(err).Msg("error closing connection")
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				cm.logger.Warn().Err(err).Msg("error closing connection")
+			}
 		}
 	}()
 
@@ -142,9 +183,8 @@ func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Reque
 
 	// Read loop (to detect client disconnect)
 	for {
-		// We only read to detect the disconnect. We don't process messages.
 		if _, _, err := conn.ReadMessage(); err != nil {
-			break // Client disconnected or error
+			break
 		}
 	}
 }
@@ -171,14 +211,14 @@ func (cm *ConnectionManager) Remove(userURN urn.URN) {
 		cm.logger.Error().Err(err).Str("user", userURN.String()).Msg("Failed to delete user presence from cache.")
 	}
 
-	// --- THIS IS THE NEW LOGIC ---
 	// 2. Trigger hot-to-cold migration for this user
 	cm.logger.Info().Str("user", userURN.String()).Msg("User disconnected. Triggering hot-to-cold queue migration.")
-	if err := cm.messageQueue.MigrateHotToCold(context.Background(), userURN); err != nil {
-		// This is a critical error, as messages might be stuck in the hot queue.
+	migrationCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := cm.messageQueue.MigrateHotToCold(migrationCtx, userURN); err != nil {
 		cm.logger.Error().Err(err).Str("user", userURN.String()).Msg("CRITICAL: Hot-to-cold migration failed.")
 	}
-	// --- END NEW LOGIC ---
 
 	cm.logger.Info().Str("user", userURN.String()).Msg("User disconnected.")
 }

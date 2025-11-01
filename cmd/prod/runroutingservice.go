@@ -1,7 +1,8 @@
 /*
 File: cmd/runroutingservice/runroutingservice.go
-Description: REFACTORED to wire up the new 'CompositeMessageQueue'
-and remove all logic related to the old 'DeliveryBus'.
+Description: REFACTORED to remove the 'local' run_mode and the
+'NewFakeDependencies' function. The service now always
+builds production dependencies.
 */
 package main
 
@@ -15,7 +16,7 @@ import (
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/redis/go-redis/v9" // NEW: Import redis
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/tinywideclouds/go-routing-service/cmd"
@@ -23,8 +24,8 @@ import (
 	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	psub "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/push"
-	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue" // NEW
-	"github.com/tinywideclouds/go-routing-service/internal/queue"                  // NEW
+	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/internal/realtime"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice"
@@ -50,6 +51,7 @@ func main() {
 
 	// 3. Create dependencies
 	ctx := context.Background()
+	// REFACTORED: Call newDependencies directly
 	deps, err := newDependencies(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize dependencies")
@@ -72,12 +74,11 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to create API service")
 	}
 
-	// REFACTORED: The 'DeliveryConsumer' dependency is removed.
 	connManager, err := realtime.NewConnectionManager(
 		cfg.WebSocketPort,
 		authMiddleware,
 		deps.PresenceCache,
-		deps.MessageQueue, // NEW: Pass the unified MessageQueue
+		deps.MessageQueue,
 		logger.With().Str("component", "ConnManager").Logger(),
 	)
 	if err != nil {
@@ -98,13 +99,14 @@ func newAuthMiddleware(cfg *config.AppConfig, logger zerolog.Logger) (func(http.
 }
 
 // newDependencies builds the service dependency container.
+// REFACTORED: Removed 'local' run_mode check.
 func newDependencies(ctx context.Context, cfg *config.AppConfig, logger zerolog.Logger) (*routing.ServiceDependencies, error) {
-	if cfg.RunMode == "local" {
-		logger.Warn().Msg("Running in 'local' mode. All external dependencies will be faked.")
-		return cmd.NewFakeDependencies(ctx, cfg, logger)
-	}
+	// Always builds production dependencies.
+	// Emulators are handled via environment variables, not a config flag.
 	return newProdDependencies(ctx, cfg, logger)
 }
+
+// DELETED: NewFakeDependencies(ctx, cfg, logger)
 
 // newProdDependencies creates real, production-ready dependencies.
 func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger zerolog.Logger) (*routing.ServiceDependencies, error) {
@@ -117,7 +119,6 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger zero
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to pubsub: %w", err)
 	}
-	// Note: Redis client connection is handled in 'newHotQueue'
 
 	// --- Create new Queue components ---
 	coldQueue, err := fsqueue.NewFirestoreColdQueue(fsClient, cfg.ColdQueueCollection, logger)
@@ -166,7 +167,6 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger zero
 	}, nil
 }
 
-// --- NEW HELPER ---
 // newHotQueue creates the pluggable HotQueue based on config.
 func newHotQueue(ctx context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger zerolog.Logger) (queue.HotQueue, error) {
 	cacheType := cfg.HotQueue.Type
@@ -208,9 +208,8 @@ func newHotQueue(ctx context.Context, cfg *config.AppConfig, fsClient *firestore
 	}
 }
 
-// --- Production Dependency Constructors (mostly unchanged) ---
+// --- Production Dependency Constructors (unchanged) ---
 
-// newIngestionConsumer creates the persistent subscription for the main ingress topic.
 func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger zerolog.Logger) (messagepipeline.MessageConsumer, error) {
 	topicPath := fmt.Sprintf("projects/%s/topics/%s", cfg.ProjectID, cfg.IngressTopicID)
 	subPath := fmt.Sprintf("projects/%s/subscriptions/%s", cfg.ProjectID, cfg.IngressSubscriptionID)
@@ -241,23 +240,20 @@ func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *
 	)
 }
 
-// newPresenceCache creates a Firestore-backed presence cache.
 func newPresenceCache(ctx context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger zerolog.Logger) (cache.PresenceCache[urn.URN, routing.ConnectionInfo], error) {
 	cacheType := cfg.PresenceCache.Type
 	logger.Info().Str("type", cacheType).Msg("Initializing presence cache...")
 	switch cacheType {
 	case "firestore":
-		// This uses the FirestorePresenceCache from the dataflow library
 		return cache.NewFirestorePresenceCache[urn.URN, routing.ConnectionInfo](
 			fsClient,
-			cfg.PresenceCache.Firestore.MainCollectionName, // Use MainCollectionName
+			cfg.PresenceCache.Firestore.MainCollectionName,
 		)
 	default:
 		return nil, fmt.Errorf("invalid presence_cache type: %s", cacheType)
 	}
 }
 
-// newFirestoreTokenFetcher creates a Firestore-backed token fetcher.
 func newFirestoreTokenFetcher(ctx context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger zerolog.Logger) (cache.Fetcher[urn.URN, []routing.DeviceToken], error) {
 	stringDocFetcher, err := cache.NewFirestore[string, persistence.DeviceTokenDoc](
 		ctx,
@@ -272,7 +268,6 @@ func newFirestoreTokenFetcher(ctx context.Context, cfg *config.AppConfig, fsClie
 	return persistence.NewURNTokenFetcherAdapter(stringTokenFetcher), nil
 }
 
-// newPushNotifier creates a Pub/Sub-backed push notifier.
 func newPushNotifier(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger zerolog.Logger) (routing.PushNotifier, error) {
 	pushProducer, err := messagepipeline.NewGooglePubsubProducer(
 		messagepipeline.NewGooglePubsubProducerDefaults(cfg.PushNotificationsTopicID), psClient, logger,
