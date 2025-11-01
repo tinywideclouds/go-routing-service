@@ -2,23 +2,21 @@
 
 /*
 File: internal/realtime/connectionmanager_test.go
-Description: CORRECTED REFACTOR to fix the test failure.
-- Uses 'SetWriteDeadline' for a deterministic failure.
-- All other test setup logic is confirmed correct.
+Description: REFACTORED to remove all tests for the delivery pipeline.
+It now tests that 'Remove' correctly calls the new
+'MessageQueue.MigrateHotToCold' method.
 */
 package realtime
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/illmade-knight/go-dataflow/pkg/cache"
-	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -28,59 +26,87 @@ import (
 	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	routingv1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// mockMessageConsumer satisfies the MessageConsumer interface,
-// including the missing 'Done()' method.
-type mockMessageConsumer struct {
+// --- Mocks ---
+
+type mockPresenceCache struct {
 	mock.Mock
 }
 
-func (m *mockMessageConsumer) Messages() <-chan messagepipeline.Message {
-	return make(chan messagepipeline.Message)
+func (m *mockPresenceCache) Set(ctx context.Context, key urn.URN, val routing.ConnectionInfo) error {
+	args := m.Called(ctx, key, val)
+	return args.Error(0)
 }
-func (m *mockMessageConsumer) Done() <-chan struct{} {
-	return make(chan struct{})
+func (m *mockPresenceCache) Fetch(ctx context.Context, key urn.URN) (routing.ConnectionInfo, error) {
+	args := m.Called(ctx, key)
+	return args.Get(0).(routing.ConnectionInfo), args.Error(1)
 }
-func (m *mockMessageConsumer) Start(ctx context.Context) error { return nil }
-func (m *mockMessageConsumer) Stop(ctx context.Context) error  { return nil }
+func (m *mockPresenceCache) Delete(ctx context.Context, key urn.URN) error {
+	args := m.Called(ctx, key)
+	return args.Error(0)
+}
+func (m *mockPresenceCache) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+// REFACTORED: Mock for queue.MessageQueue
+type mockMessageQueue struct {
+	mock.Mock
+}
+
+func (m *mockMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, envelope)
+	return args.Error(0)
+}
+func (m *mockMessageQueue) EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, envelope)
+	return args.Error(0)
+}
+func (m *mockMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routingv1.QueuedMessage, error) {
+	args := m.Called(ctx, userURN, limit)
+	var result []*routingv1.QueuedMessage
+	if val, ok := args.Get(0).([]*routingv1.QueuedMessage); ok {
+		result = val
+	}
+	return result, args.Error(1)
+}
+func (m *mockMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
+	args := m.Called(ctx, userURN, messageIDs)
+	return args.Error(0)
+}
+func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN) error {
+	args := m.Called(ctx, userURN)
+	return args.Error(0)
+}
 
 // testFixture holds all the components for a test.
 type testFixture struct {
-	cm             *ConnectionManager
-	presenceCache  cache.PresenceCache[urn.URN, routing.ConnectionInfo]
-	wsServer       *httptest.Server
-	wsClientConn   *websocket.Conn
-	userURN        urn.URN
-	messageHandler chan []byte
+	cm            *ConnectionManager
+	presenceCache *mockPresenceCache
+	messageQueue  *mockMessageQueue
+	wsServer      *httptest.Server
+	userURN       urn.URN
 }
 
-// REFACTORED: Helper to create the new "dumb" envelope
-func newTestEnvelope(t *testing.T, recipient urn.URN) *secure.SecureEnvelope {
-	t.Helper()
-	return &secure.SecureEnvelope{
-		RecipientID:   recipient,
-		EncryptedData: []byte("test-data"),
-	}
-}
-
-// setup creates a full test fixture for the ConnectionManager.
+// setup creates a test fixture for the ConnectionManager.
 func setup(t *testing.T) *testFixture {
 	t.Helper()
 	logger := zerolog.Nop()
 
-	// 1. Create Mocks & Real Cache
-	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]()
-	consumer := new(mockMessageConsumer)
+	// 1. Create Mocks
+	presenceCache := new(mockPresenceCache)
+	messageQueue := new(mockMessageQueue)
 
 	// 2. Create ConnectionManager
-	// (Assuming middleware.NoopAuth has been added)
 	cm, err := NewConnectionManager(
 		"0",
 		middleware.NoopAuth(true, "test-user-id"),
 		presenceCache,
-		consumer,
+		messageQueue,
 		logger,
 	)
 	require.NoError(t, err, "NewConnectionManager failed")
@@ -89,118 +115,89 @@ func setup(t *testing.T) *testFixture {
 	wsServer := httptest.NewServer(cm.server.Handler)
 	t.Cleanup(wsServer.Close)
 
-	// 4. Create a test WebSocket client
-	wsURL := "ws" + strings.TrimPrefix(wsServer.URL, "http") + "/connect"
+	userURN, err := urn.Parse("urn:sm:user:test-user-id")
+	require.NoError(t, err)
+
+	return &testFixture{
+		cm:            cm,
+		presenceCache: presenceCache,
+		messageQueue:  messageQueue,
+		wsServer:      wsServer,
+		userURN:       userURN,
+	}
+}
+
+// connectClient connects a new websocket client and waits for it to be registered.
+func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(fx.wsServer.URL, "http") + "/connect"
+
+	// Mock the 'add' dependencies
+	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil)
+
 	wsClientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err, "Failed to dial test WebSocket server")
 	t.Cleanup(func() { _ = wsClientConn.Close() })
 
-	userURN, err := urn.Parse("urn:sm:user:test-user-id")
-	require.NoError(t, err)
-
-	// 5. Create a message handler to read from the client
-	messageHandler := make(chan []byte, 1)
-	go func() {
-		for {
-			_, msg, err := wsClientConn.ReadMessage()
-			if err != nil {
-				return // Connection closed
-			}
-			messageHandler <- msg
-		}
-	}()
-
 	// Wait for the connection to be registered
 	require.Eventually(t, func() bool {
-		_, ok := cm.connections.Load(userURN.String())
+		_, ok := fx.cm.connections.Load(fx.userURN.String())
 		return ok
 	}, 2*time.Second, 10*time.Millisecond, "User connection was not registered")
 
-	return &testFixture{
-		cm:             cm,
-		presenceCache:  presenceCache,
-		wsServer:       wsServer,
-		wsClientConn:   wsClientConn,
-		userURN:        userURN,
-		messageHandler: messageHandler,
-	}
+	return wsClientConn
 }
 
-func TestConnectionManager_deliveryProcessor(t *testing.T) {
-	t.Run("Success - delivers message to connected user", func(t *testing.T) {
-		fx := setup(t)
+func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
+	fx := setup(t)
 
-		// Arrange
-		envelope := newTestEnvelope(t, fx.userURN)
+	// --- 1. Test Connect ---
+	// Mock expectations for 'add'
+	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil).Once()
 
-		// Act
-		err := fx.cm.deliveryProcessor(context.Background(), messagepipeline.Message{}, envelope)
-		require.NoError(t, err)
+	// Connect the client
+	wsClientConn := fx.connectClient(t)
 
-		// Assert: Check that the client received the message
-		var receivedMsgBytes []byte
-		select {
-		case receivedMsgBytes = <-fx.messageHandler:
-			// success
-		case <-time.After(1 * time.Second):
-			t.Fatal("Timed out waiting for message from WebSocket client")
-		}
+	// Assert 'add' was called
+	fx.presenceCache.AssertCalled(t, "Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo"))
 
-		var receivedEnvelope secure.SecureEnvelope
-		err = json.Unmarshal(receivedMsgBytes, &receivedEnvelope)
-		require.NoError(t, err, "Failed to unmarshal JSON from WebSocket")
+	// --- 2. Test Disconnect ---
+	// Mock expectations for 'Remove'
+	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
+	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).Return(nil).Once()
 
-		assert.Equal(t, envelope, &receivedEnvelope)
-	})
+	// Close the client connection to trigger the server's read loop exit
+	err := wsClientConn.Close()
+	require.NoError(t, err)
 
-	t.Run("Success - skips message for unconnected user", func(t *testing.T) {
-		fx := setup(t)
+	// Wait for 'Remove' to be called
+	require.Eventually(t, func() bool {
+		// Check that the mocks were called
+		return fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN) &&
+			fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
+	}, 2*time.Second, 10*time.Millisecond, "Remove() logic was not fully triggered")
 
-		// Arrange
-		otherUser, _ := urn.Parse("urn:sm:user:other-user")
-		envelope := newTestEnvelope(t, otherUser)
-
-		// Act
-		err := fx.cm.deliveryProcessor(context.Background(), messagepipeline.Message{}, envelope)
-
-		// Assert
-		assert.NoError(t, err, "Processing a message for an unconnected user should not be an error")
-		assert.Len(t, fx.messageHandler, 0, "No message should have been sent")
-	})
-
-	t.Run("Failure - removes connection on write error", func(t *testing.T) {
-		fx := setup(t)
-
-		// --- THIS IS THE FIX ---
-		// Arrange:
-		// Get the *server-side* connection from the manager
-		connVal, ok := fx.cm.connections.Load(fx.userURN.String())
-		require.True(t, ok, "Precondition failed: server-side connection not found")
-		serverConn, ok := connVal.(*websocket.Conn)
-		require.True(t, ok, "Precondition failed: connection is not *websocket.Conn")
-
-		// Set the write deadline to the past.
-		// This will cause conn.WriteJSON() to fail with a timeout
-		// without triggering the read loop's cleanup.
-		err := serverConn.SetWriteDeadline(time.Now().Add(-1 * time.Second))
-		require.NoError(t, err)
-
-		envelope := newTestEnvelope(t, fx.userURN)
-
-		// Act:
-		// We immediately call the processor. It will find the connection,
-		// attempt to write, fail, and then call cm.Remove().
-		err = fx.cm.deliveryProcessor(context.Background(), messagepipeline.Message{}, envelope)
-		// --- END FIX ---
-
-		// Assert
-		assert.Error(t, err, "Processing should have failed due to write error")
-
-		// Assert that the connection and presence were removed *by deliveryProcessor*
-		_, ok = fx.cm.connections.Load(fx.userURN.String())
-		assert.False(t, ok, "Connection was not removed from map")
-
-		_, err = fx.presenceCache.Fetch(context.Background(), fx.userURN)
-		assert.Error(t, err, "Presence was not removed from cache")
-	})
+	// Assert connection is gone from the map
+	_, ok := fx.cm.connections.Load(fx.userURN.String())
+	assert.False(t, ok, "Connection was not removed from map")
 }
+
+func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
+	fx := setup(t)
+	testErr := errors.New("migration failed")
+
+	// Mock expectations for 'Remove'
+	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
+	// --- This is the failure ---
+	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).Return(testErr).Once()
+
+	// Manually call Remove (as if a disconnect happened)
+	fx.cm.Remove(fx.userURN)
+
+	// Assert all mocks were called
+	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
+	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
+	// The test will log an error, which is the expected behavior.
+}
+
+// DELETED: All tests related to 'deliveryProcessor'

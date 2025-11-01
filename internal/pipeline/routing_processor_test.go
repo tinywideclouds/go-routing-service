@@ -2,8 +2,8 @@
 
 /*
 File: internal/pipeline/routing_processor_test.go
-Description: REFACTORED to test the processor with the
-new 'secure.SecureEnvelope' and new mock interfaces.
+Description: REFACTORED to test the new 'queue.MessageQueue'
+and the hot/cold enqueue logic.
 */
 package pipeline_test
 
@@ -23,7 +23,7 @@ import (
 
 	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
-	routingV1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
+	routingv1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -41,13 +41,6 @@ func (m *mockFetcher[K, V]) Fetch(ctx context.Context, key K) (V, error) {
 	}
 	return result, args.Error(1)
 }
-
-func (m *mockFetcher[K, V]) Delete(ctx context.Context, key K) error {
-	args := m.Called(ctx, key)
-
-	return args.Error(1)
-}
-
 func (m *mockFetcher[K, V]) Close() error {
 	args := m.Called()
 	return args.Error(0)
@@ -61,7 +54,6 @@ func (m *mockPresenceCache[K, V]) Set(ctx context.Context, key K, val V) error {
 	args := m.Called(ctx, key, val)
 	return args.Error(0)
 }
-
 func (m *mockPresenceCache[K, V]) Fetch(ctx context.Context, key K) (V, error) {
 	args := m.Called(ctx, key)
 	var result V
@@ -70,67 +62,60 @@ func (m *mockPresenceCache[K, V]) Fetch(ctx context.Context, key K) (V, error) {
 	}
 	return result, args.Error(1)
 }
-
 func (m *mockPresenceCache[K, V]) Delete(ctx context.Context, key K) error {
 	args := m.Called(ctx, key)
 	return args.Error(0)
 }
-
 func (m *mockPresenceCache[K, V]) Close() error {
 	args := m.Called()
 	return args.Error(0)
 }
 
-// REFACTORED: Mock matches new interface
-type mockMessageStore struct {
+// REFACTORED: Mock for queue.MessageQueue
+type mockMessageQueue struct {
 	mock.Mock
 }
 
-func (m *mockMessageStore) StoreMessages(ctx context.Context, recipient urn.URN, envelopes []*secure.SecureEnvelope) error {
-	args := m.Called(ctx, recipient, envelopes)
+func (m *mockMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, envelope)
 	return args.Error(0)
 }
-
-func (m *mockMessageStore) RetrieveMessageBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routingV1.QueuedMessage, error) {
+func (m *mockMessageQueue) EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, envelope)
+	return args.Error(0)
+}
+func (m *mockMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routingv1.QueuedMessage, error) {
 	args := m.Called(ctx, userURN, limit)
-	var result []*routingV1.QueuedMessage
-	if val, ok := args.Get(0).([]*routingV1.QueuedMessage); ok {
+	var result []*routingv1.QueuedMessage
+	if val, ok := args.Get(0).([]*routingv1.QueuedMessage); ok {
 		result = val
 	}
 	return result, args.Error(1)
 }
-
-func (m *mockMessageStore) AcknowledgeMessages(ctx context.Context, userURN urn.URN, messageIDs []string) error {
+func (m *mockMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
 	args := m.Called(ctx, userURN, messageIDs)
 	return args.Error(0)
 }
-
-// REFACTORED: Mock matches new interface
-type mockDeliveryProducer struct {
-	mock.Mock
-}
-
-func (m *mockDeliveryProducer) Publish(ctx context.Context, topicID string, envelope *secure.SecureEnvelope) error {
-	args := m.Called(ctx, topicID, envelope)
+func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN) error {
+	args := m.Called(ctx, userURN)
 	return args.Error(0)
 }
 
-// REFACTORED: Mock matches new interface
-type mockPushNotifierb struct {
+// REFACTORED: Renamed mock for clarity
+type mockPushNotifier struct {
 	mock.Mock
 }
 
-func (m *mockPushNotifierb) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
+func (m *mockPushNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
 	args := m.Called(ctx, tokens, envelope)
 	return args.Error(0)
 }
 
 // --- Test Setup ---
 var (
-	nopLogger  = zerolog.Nop()
-	testConfig = &config.AppConfig{DeliveryTopicID: "test-delivery-topic"}
-	testURN, _ = urn.Parse("urn:sm:user:test-user")
-	// REFACTORED: Use new "dumb" envelope
+	nopLogger    = zerolog.Nop()
+	testConfig   = &config.AppConfig{} // No longer needed for TopicID
+	testURN, _   = urn.Parse("urn:sm:user:test-user")
 	testEnvelope = &secure.SecureEnvelope{
 		RecipientID:   testURN,
 		EncryptedData: []byte("test"),
@@ -144,20 +129,20 @@ var (
 func TestRoutingProcessor_OnlineUser(t *testing.T) {
 	// Arrange
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
-	deliveryProducer := new(mockDeliveryProducer)
-	messageStore := new(mockMessageStore)
-	deps := &routing.Dependencies{
-		PresenceCache:    presenceCache,
-		DeliveryProducer: deliveryProducer,
-		MessageStore:     messageStore,
+	messageQueue := new(mockMessageQueue)
+	pushNotifier := new(mockPushNotifier) // Used for "poke"
+	deps := &routing.ServiceDependencies{
+		PresenceCache: presenceCache,
+		MessageQueue:  messageQueue,
+		PushNotifier:  pushNotifier,
 	}
 
 	// 1. User is online
 	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, nil)
-	// 2. Expect publish to delivery bus
-	deliveryProducer.On("Publish", mock.Anything, testConfig.DeliveryTopicID, testEnvelope).Return(nil)
-	// 3. Expect message to ALSO be stored (for multi-device)
-	messageStore.On("StoreMessages", mock.Anything, testURN, []*secure.SecureEnvelope{testEnvelope}).Return(nil)
+	// 2. Expect publish to HOT queue
+	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(nil)
+	// 3. Expect a "poke" notification (nil envelope, nil tokens)
+	pushNotifier.On("Notify", mock.Anything, []routing.DeviceToken(nil), (*secure.SecureEnvelope)(nil)).Return(nil)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
@@ -166,7 +151,8 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 
 	// Assert
 	require.NoError(t, err)
-	mock.AssertExpectationsForObjects(t, presenceCache, deliveryProducer, messageStore)
+	mock.AssertExpectationsForObjects(t, presenceCache, messageQueue, pushNotifier)
+	messageQueue.AssertNotCalled(t, "EnqueueCold", mock.Anything, mock.Anything)
 }
 
 func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
@@ -174,12 +160,12 @@ func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	deviceTokenFetcher := new(mockFetcher[urn.URN, []routing.DeviceToken])
 	pushNotifier := new(mockPushNotifier)
-	messageStore := new(mockMessageStore)
-	deps := &routing.Dependencies{
+	messageQueue := new(mockMessageQueue)
+	deps := &routing.ServiceDependencies{
 		PresenceCache:      presenceCache,
 		DeviceTokenFetcher: deviceTokenFetcher,
 		PushNotifier:       pushNotifier,
-		MessageStore:       messageStore,
+		MessageQueue:       messageQueue,
 	}
 
 	testTokens := []routing.DeviceToken{
@@ -194,10 +180,10 @@ func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
 	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
 	// 2. Fetches tokens
 	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return(testTokens, nil)
-	// 3. Sends push notification (with only mobile tokens)
+	// 3. Sends push notification (with full envelope)
 	pushNotifier.On("Notify", mock.Anything, expectedMobileTokens, testEnvelope).Return(nil)
-	// 4. Stores message
-	messageStore.On("StoreMessages", mock.Anything, testURN, []*secure.SecureEnvelope{testEnvelope}).Return(nil)
+	// 4. Stores message in COLD queue
+	messageQueue.On("EnqueueCold", mock.Anything, testEnvelope).Return(nil)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
@@ -206,28 +192,29 @@ func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
 
 	// Assert
 	require.NoError(t, err)
-	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, pushNotifier, messageStore)
+	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, pushNotifier, messageQueue)
+	messageQueue.AssertNotCalled(t, "EnqueueHot", mock.Anything, mock.Anything)
 }
 
 func TestRoutingProcessor_OfflineUser_NoTokens(t *testing.T) {
 	// Arrange
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	deviceTokenFetcher := new(mockFetcher[urn.URN, []routing.DeviceToken])
-	pushNotifier := new(mockPushNotifier) // This will be used
-	messageStore := new(mockMessageStore)
-	deps := &routing.Dependencies{
+	pushNotifier := new(mockPushNotifier)
+	messageQueue := new(mockMessageQueue)
+	deps := &routing.ServiceDependencies{
 		PresenceCache:      presenceCache,
 		DeviceTokenFetcher: deviceTokenFetcher,
 		PushNotifier:       pushNotifier,
-		MessageStore:       messageStore,
+		MessageQueue:       messageQueue,
 	}
 
 	// 1. User is offline
 	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
 	// 2. Fetches tokens (but finds none)
 	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return([]routing.DeviceToken{}, nil)
-	// 3. Stores message
-	messageStore.On("StoreMessages", mock.Anything, testURN, []*secure.SecureEnvelope{testEnvelope}).Return(nil)
+	// 3. Stores message in COLD queue
+	messageQueue.On("EnqueueCold", mock.Anything, testEnvelope).Return(nil)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
@@ -236,68 +223,62 @@ func TestRoutingProcessor_OfflineUser_NoTokens(t *testing.T) {
 
 	// Assert
 	require.NoError(t, err)
-	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageStore)
-	// 4. Asserts push notifier was NOT called
-	pushNotifier.AssertNotCalled(t, "Notify", mock.Anything, mock.Anything, mock.Anything)
-}
-
-func TestRoutingProcessor_OfflineUser_TokenFetchFails(t *testing.T) {
-	// Arrange
-	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
-	deviceTokenFetcher := new(mockFetcher[urn.URN, []routing.DeviceToken])
-	pushNotifier := new(mockPushNotifier) // This will be used
-	messageStore := new(mockMessageStore)
-	deps := &routing.Dependencies{
-		PresenceCache:      presenceCache,
-		DeviceTokenFetcher: deviceTokenFetcher,
-		PushNotifier:       pushNotifier,
-		MessageStore:       messageStore,
-	}
-
-	// 1. User is offline
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
-	// 2. Token fetch fails
-	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return(nil, testErr)
-	// 3. Stores message (this should happen anyway)
-	messageStore.On("StoreMessages", mock.Anything, testURN, []*secure.SecureEnvelope{testEnvelope}).Return(nil)
-
-	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
-
-	// Act
-	err := processor(context.Background(), testMessage, testEnvelope)
-
-	// Assert: The processor should NOT return an error, as token fetch is non-critical
-	require.NoError(t, err)
-	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageStore)
-	// 4. Asserts push notifier was NOT called
+	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageQueue)
 	pushNotifier.AssertNotCalled(t, "Notify", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestRoutingProcessor_CriticalStoreFailure(t *testing.T) {
-	// Arrange
+	// Arrange: Offline user
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	deviceTokenFetcher := new(mockFetcher[urn.URN, []routing.DeviceToken])
-	messageStore := new(mockMessageStore)
-	deps := &routing.Dependencies{
+	messageQueue := new(mockMessageQueue)
+	deps := &routing.ServiceDependencies{
 		PresenceCache:      presenceCache,
 		DeviceTokenFetcher: deviceTokenFetcher,
-		MessageStore:       messageStore,
+		MessageQueue:       messageQueue,
+		PushNotifier:       new(mockPushNotifier), // Not called, but need non-nil
 	}
 
 	// 1. User is offline
 	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
 	// 2. Fetches tokens (finds none)
 	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return([]routing.DeviceToken{}, nil)
-	// 3. StoreMessages fails (this IS critical)
-	messageStore.On("StoreMessages", mock.Anything, testURN, []*secure.SecureEnvelope{testEnvelope}).Return(testErr)
+	// 3. EnqueueCold fails (this IS critical)
+	messageQueue.On("EnqueueCold", mock.Anything, testEnvelope).Return(testErr)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
 	// Act
 	err := processor(context.Background(), testMessage, testEnvelope)
 
-	// Assert: The error from StoreMessages should be propagated
+	// Assert: The error from EnqueueCold should be propagated
 	require.Error(t, err)
-	assert.Equal(t, testErr, err)
-	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageStore)
+	assert.Equal(t, testErr, errors.Unwrap(err))
+	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageQueue)
+}
+
+func TestRoutingProcessor_HotEnqueueFailure(t *testing.T) {
+	// Arrange: Online user
+	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
+	messageQueue := new(mockMessageQueue)
+	deps := &routing.ServiceDependencies{
+		PresenceCache: presenceCache,
+		MessageQueue:  messageQueue,
+		PushNotifier:  new(mockPushNotifier), // Not called, but need non-nil
+	}
+
+	// 1. User is online
+	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, nil)
+	// 2. EnqueueHot fails (the composite queue handles the fallback)
+	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(testErr)
+
+	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
+
+	// Act
+	err := processor(context.Background(), testMessage, testEnvelope)
+
+	// Assert: The error is propagated so the message is NACK'd
+	require.Error(t, err)
+	assert.Equal(t, testErr, errors.Unwrap(err))
+	mock.AssertExpectationsForObjects(t, presenceCache, messageQueue)
 }

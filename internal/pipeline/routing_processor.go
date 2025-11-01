@@ -1,7 +1,7 @@
 /*
 File: internal/pipeline/routing_processor.go
-Description: REFACTORED to use the new 'secure.SecureEnvelope'
-type. Also removes logging of 'MessageID' as it's no longer visible.
+Description: REFACTORED to use the new 'queue.MessageQueue' and implement
+the 'Hot/Cold' queue logic based on user presence.
 */
 package pipeline
 
@@ -12,50 +12,49 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/rs/zerolog"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
-	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 
 	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
+	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 )
 
 // NewRoutingProcessor creates the main message handler (StreamProcessor) for the routing pipeline.
-// It determines user presence and routes messages to the correct delivery channel.
-// REFACTORED: Updated generic type
-func NewRoutingProcessor(deps *routing.Dependencies, cfg *config.AppConfig, logger zerolog.Logger) messagepipeline.StreamProcessor[secure.SecureEnvelope] {
-	// REFACTORED: Updated function signature
+// It determines user presence and routes messages to the correct hot/cold queue.
+func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfig, logger zerolog.Logger) messagepipeline.StreamProcessor[secure.SecureEnvelope] {
 	return func(ctx context.Context, msg messagepipeline.Message, envelope *secure.SecureEnvelope) error {
 		recipientURN := envelope.RecipientID
-		// REFACTORED: Removed 'message_id' from log, as it's no longer available.
 		procLogger := logger.With().Str("recipient_id", recipientURN.String()).Logger()
 
 		// 1. Check if the user is online via the presence cache.
 		if _, err := deps.PresenceCache.Fetch(ctx, recipientURN); err == nil {
-			procLogger.Info().Msg("User is online. Routing message to real-time delivery bus.")
-			// REFACTORED: Pass new envelope type
-			err := deps.DeliveryProducer.Publish(ctx, cfg.DeliveryTopicID, envelope)
-			if err != nil {
-				// If this fails, we must NACK so we can retry.
-				// This could cause a duplicate (if the user goes offline),
-				// but that's better than dropping the message.
-				return fmt.Errorf("failed to publish to delivery bus: %w", err)
+			// --- REFACTORED: HOT PATH ---
+			procLogger.Info().Msg("User is online. Routing message to HOT queue.")
+			if err := deps.MessageQueue.EnqueueHot(ctx, envelope); err != nil {
+				// If EnqueueHot fails, it automatically falls back to cold.
+				// If *that* fails, the error is returned.
+				return fmt.Errorf("failed to enqueue message (hot and cold fallback): %w", err)
 			}
 
-			// If we dispatch for online delivery, we ALSO store for offline.
-			// This handles the "multi-device" use case.
-			return storeMessage(ctx, deps.MessageStore, envelope, procLogger)
+			// After successful enqueue, send a "poke" notification.
+			// We send a 'nil' envelope to signal this is a "poke", not a push.
+			if err := deps.PushNotifier.Notify(ctx, nil, nil); err != nil {
+				// Non-critical, just log it. The message is already queued.
+				procLogger.Warn().Err(err).Msg("Failed to send online 'poke' notification.")
+			}
+			return nil
+			// --- END REFACTOR ---
 		}
 
+		// --- REFACTORED: COLD PATH ---
 		// 2. User is offline. Fetch their device tokens for push notifications.
 		procLogger.Info().Msg("User is offline. Checking for push notification tokens.")
 		tokens, err := deps.DeviceTokenFetcher.Fetch(ctx, recipientURN)
 		if err != nil {
 			procLogger.Warn().Err(err).Msg("Failed to fetch device tokens. Message will be stored but no push will be sent.")
-			// We don't return the error, as this is non-critical.
-			// We must still store the message.
+			// Non-critical. We must still store the message.
 		}
 
-		// 3. Separate tokens by platform (web vs. mobile)
-		// We only send push notifications for mobile.
+		// 3. Separate tokens for mobile.
 		var mobileTokens []routing.DeviceToken
 		for _, token := range tokens {
 			if token.Platform == "ios" || token.Platform == "android" {
@@ -63,31 +62,25 @@ func NewRoutingProcessor(deps *routing.Dependencies, cfg *config.AppConfig, logg
 			}
 		}
 
-		// 4. Handle mobile notifications by publishing to the external push notification service.
+		// 4. Send mobile notifications.
 		if len(mobileTokens) > 0 {
 			procLogger.Info().Int("count", len(mobileTokens)).Msg("Routing notification to push notification service.")
-			// REFACTORED: Pass new envelope type
-			err := deps.PushNotifier.Notify(ctx, mobileTokens, envelope)
-			if err != nil {
+			// We send the *full* envelope here for a rich push.
+			if err := deps.PushNotifier.Notify(ctx, mobileTokens, envelope); err != nil {
 				procLogger.Error().Err(err).Msg("Push notifier failed. Message will be stored, but this error is logged.")
-				// Again, non-critical. We still must store.
+				// Non-critical. We still must store.
 			}
 		}
 
-		// 5. Finally, store the message for later retrieval via the API.
-		return storeMessage(ctx, deps.MessageStore, envelope, procLogger)
+		// 5. Finally, store the message in the COLD queue.
+		procLogger.Info().Msg("Storing message in COLD queue for later retrieval.")
+		if err := deps.MessageQueue.EnqueueCold(ctx, envelope); err != nil {
+			// This is a critical error. Return it to trigger a NACK.
+			return fmt.Errorf("failed to store message in cold queue: %w", err)
+		}
+		return nil
+		// --- END REFACTOR ---
 	}
 }
 
-// storeMessage is a helper to encapsulate the logic for storing a message offline.
-// REFACTORED: Updated signature
-func storeMessage(ctx context.Context, store routing.MessageStore, envelope *secure.SecureEnvelope, logger zerolog.Logger) error {
-	logger.Info().Msg("Storing message for later retrieval.")
-	// REFACTORED: Pass new envelope type
-	err := store.StoreMessages(ctx, envelope.RecipientID, []*secure.SecureEnvelope{envelope})
-	if err != nil {
-		logger.Error().Err(err).Msg("Failed to store message in Firestore. Message will be NACK'd for retry.")
-		return err // This is a critical error. Return it to trigger a NACK.
-	}
-	return nil
-}
+// DELETED: storeMessage helper function

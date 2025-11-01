@@ -1,0 +1,12 @@
+hot_queue:
+  type: "redis"
+  redis:
+    addr: "my-redis-host:6379"
+  firestore: {} # This part is ignored
+# hot_queue in yaml decides which is used by the main
+#hot_queue:
+#  type: "firestore"
+#  redis: {} # This part is ignored
+#  firestore:
+#    main_collection_name: "user-hot-messages"
+#    pending_collection_name: "user-hot-pending"
