@@ -19,11 +19,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/illmade-knight/go-routing-service/pkg/routing"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
 	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"

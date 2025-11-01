@@ -10,7 +10,7 @@ import (
 	"context"
 
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
-	"github.com/illmade-knight/go-routing-service/pkg/routing"
+	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
 	// REFACTORED: Use the new platform URN package
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"

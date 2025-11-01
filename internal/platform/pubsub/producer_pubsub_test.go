@@ -15,9 +15,9 @@ import (
 	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"cloud.google.com/go/pubsub/v2/pstest"
-	ps "github.com/illmade-knight/go-routing-service/internal/platform/pubsub" // Aliased import
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ps "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub" // Aliased import
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

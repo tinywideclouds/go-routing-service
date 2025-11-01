@@ -10,9 +10,9 @@ import (
 	"fmt"
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/illmade-knight/go-routing-service/pkg/routing"
-	"github.com/illmade-knight/go-routing-service/routingservice/config"
 	"github.com/rs/zerolog"
+	"github.com/tinywideclouds/go-routing-service/pkg/routing"
+	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 
 	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"

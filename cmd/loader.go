@@ -4,7 +4,7 @@ import (
 	_ "embed" // Required for go:embed
 	"fmt"
 
-	"github.com/illmade-knight/go-routing-service/routingservice/config"
+	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 	"gopkg.in/yaml.v3"
 )
 

@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/illmade-knight/go-routing-service/internal/realtime"
-	"github.com/illmade-knight/go-routing-service/routingservice"
 	"github.com/rs/zerolog"
+	"github.com/tinywideclouds/go-routing-service/internal/realtime"
+	"github.com/tinywideclouds/go-routing-service/routingservice"
 )
 
 // Run executes the main application lifecycle for the routing service. It starts

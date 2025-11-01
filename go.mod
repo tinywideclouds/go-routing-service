@@ -1,4 +1,4 @@
-module github.com/illmade-knight/go-routing-service
+module github.com/tinywideclouds/go-routing-service
 
 go 1.24.0
 

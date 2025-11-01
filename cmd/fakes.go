@@ -3,10 +3,10 @@ package cmd
 import (
 	"context"
 
-	"github.com/illmade-knight/go-routing-service/internal/test/fakes"
-	"github.com/illmade-knight/go-routing-service/pkg/routing"
-	"github.com/illmade-knight/go-routing-service/routingservice/config"
 	"github.com/rs/zerolog"
+	"github.com/tinywideclouds/go-routing-service/internal/test/fakes"
+	"github.com/tinywideclouds/go-routing-service/pkg/routing"
+	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 )
 
 // newFakeDependencies creates in-memory fakes for local development.

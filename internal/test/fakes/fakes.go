@@ -8,10 +8,10 @@ import (
 	"sync"
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/illmade-knight/go-routing-service/pkg/routing"
 	"github.com/illmade-knight/go-secure-messaging/pkg/transport"
 	"github.com/illmade-knight/go-secure-messaging/pkg/urn"
 	"github.com/rs/zerolog"
+	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 )
 
 // --- Consumer ---
