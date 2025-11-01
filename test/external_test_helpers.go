@@ -13,8 +13,8 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/illmade-knight/go-secure-messaging/pkg/urn"
 	"github.com/rs/zerolog"
-	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	psadapter "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 )
 
@@ -74,5 +74,5 @@ func NewTestMessageStore(
 ) (routing.MessageStore, error) {
 	// This helper encapsulates the import of the internal persistence package,
 	// providing a controlled entrypoint for external tests.
-	return persistence.NewFirestoreStore(fsClient, logger)
+	return queue.NewFirestoreStore(fsClient, logger)
 }

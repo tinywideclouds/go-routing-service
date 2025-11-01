@@ -18,21 +18,22 @@ func Load() (*config.AppConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal embedded yaml config: %w", err)
 	}
 
+	// This mapping is now 1:1, as AppConfig matches YamlConfig
 	appCfg := &config.AppConfig{
-		ProjectID:                         yamlCfg.ProjectID,
-		RunMode:                           yamlCfg.RunMode,
-		APIPort:                           yamlCfg.APIPort,
-		WebSocketPort:                     yamlCfg.WebSocketPort,
-		IdentityServiceURL:                yamlCfg.IdentityServiceURL,
-		Cors:                              yamlCfg.Cors,
-		PresenceCache:                     yamlCfg.PresenceCache,
-		IngressTopicID:                    yamlCfg.IngressTopicID,
-		IngressSubscriptionID:             yamlCfg.IngressSubscriptionID,
-		IngressTopicDLQID:                 yamlCfg.IngressTopicDLQID,
-		DeliveryTopicID:                   yamlCfg.DeliveryTopicID,
-		PushNotificationsTopicID:          yamlCfg.PushNotificationsTopicID,
-		DeliveryBusSubscriptionExpiration: yamlCfg.DeliveryBusSubscriptionExpiration,
-		NumPipelineWorkers:                yamlCfg.NumPipelineWorkers, // ADDED
+		ProjectID:                yamlCfg.ProjectID,
+		RunMode:                  yamlCfg.RunMode,
+		APIPort:                  yamlCfg.APIPort,
+		WebSocketPort:            yamlCfg.WebSocketPort,
+		IdentityServiceURL:       yamlCfg.IdentityServiceURL,
+		Cors:                     yamlCfg.Cors,
+		PresenceCache:            yamlCfg.PresenceCache,
+		HotQueue:                 yamlCfg.HotQueue,
+		ColdQueueCollection:      yamlCfg.ColdQueueCollection,
+		IngressTopicID:           yamlCfg.IngressTopicID,
+		IngressSubscriptionID:    yamlCfg.IngressSubscriptionID,
+		IngressTopicDLQID:        yamlCfg.IngressTopicDLQID,
+		PushNotificationsTopicID: yamlCfg.PushNotificationsTopicID,
+		NumPipelineWorkers:       yamlCfg.NumPipelineWorkers,
 	}
 
 	return appCfg, nil

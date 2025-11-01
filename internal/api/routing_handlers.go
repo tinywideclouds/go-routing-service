@@ -1,23 +1,22 @@
 /*
 File: internal/api/routing_handlers.go
-Description: REFACTORED to implement the new API.
-- "Dumb Content": SendHandler no longer checks SenderID.
-- DELETED: GetDigestHandler and GetHistoryHandler.
-- ADDED: GetMessageBatchHandler (pull) and AcknowledgeMessagesHandler (ack).
+Description: REFACTORED to use the new 'queue.MessageQueue' interface
+instead of the old 'routing.MessageStore'.
 */
 package api
 
 import (
 	"context"
-	"encoding/json" // NEW: Using standard json for the simple ACK body
+	"encoding/json"
 	"io"
 	"net/http"
-	"strconv" // NEW: For parsing limit query param
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/illmade-knight/go-microservice-base/pkg/response"
 	"github.com/rs/zerolog"
+	"github.com/tinywideclouds/go-routing-service/internal/queue" // NEW: Import
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
 	// REFACTORED: Use new platform packages
@@ -35,16 +34,16 @@ const (
 // API holds the dependencies for the stateless HTTP handlers.
 type API struct {
 	producer routing.IngestionProducer
-	store    routing.MessageStore
+	queue    queue.MessageQueue // REFACTORED: Use new interface
 	logger   zerolog.Logger
 	wg       sync.WaitGroup
 }
 
 // NewAPI creates a new, stateless API handler.
-func NewAPI(producer routing.IngestionProducer, store routing.MessageStore, logger zerolog.Logger) *API {
+func NewAPI(producer routing.IngestionProducer, queue queue.MessageQueue, logger zerolog.Logger) *API {
 	return &API{
 		producer: producer,
-		store:    store,
+		queue:    queue, // REFACTORED: Use new interface
 		logger:   logger,
 	}
 }
@@ -54,8 +53,7 @@ func (a *API) Wait() {
 	a.wg.Wait()
 }
 
-// SendHandler ingests a message, enforces the sender's identity, and publishes it.
-// REFACTORED: This now implements the "Dumb Content" (Sealed Sender) model.
+// SendHandler ingests a message and publishes it.
 func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
@@ -69,7 +67,6 @@ func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// REFACTORED: Unmarshal into the new "dumb" envelope.
 	var envelope secure.SecureEnvelope
 	if err := envelope.UnmarshalJSON(body); err != nil {
 		a.logger.Warn().Err(err).Str("user", authedUserID).Msg("Failed to unmarshal secure envelope")
@@ -77,17 +74,6 @@ func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- "DUMB CONTENT" REFACTOR ---
-	// DELETED: The sender spoofing check is GONE.
-	//
-	// if authedUserID != envelope.SenderID.EntityID() { ... }
-	//
-	// The new 'secure.SecureEnvelope' has no SenderID.
-	// We are now a "dumb" router.
-	// ---
-
-	// Publish the message to the ingestion pipeline.
-	// REFACTORED: Pass the new envelope type.
 	if err := a.producer.Publish(r.Context(), &envelope); err != nil {
 		a.logger.Error().Err(err).Str("user", authedUserID).Msg("Failed to publish message to ingestion topic")
 		response.WriteJSONError(w, http.StatusInternalServerError, "failed to send message")
@@ -97,15 +83,7 @@ func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, http.StatusAccepted, nil)
 }
 
-// --- DELETED HANDLERS ---
-//
-// func (a *API) GetDigestHandler(w http.ResponseWriter, r *http.Request)
-// func (a *API) GetHistoryHandler(w http.ResponseWriter, r *http.Request)
-//
-// --- DELETED ---
-
-// NEW: GetMessageBatchHandler implements the "pull" part of the "Reliable Dumb Queue".
-// It retrieves the next available batch of messages for the authenticated user.
+// GetMessageBatchHandler implements the "pull" part of the queue.
 func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
@@ -136,17 +114,16 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 
 	log := a.logger.With().Str("user", userURN.String()).Int("limit", limit).Logger()
 
-	// 1. Call the store to get the batch of wrapper messages
-	queuedMessages, err := a.store.RetrieveMessageBatch(r.Context(), userURN, limit)
+	// 1. Call the queue to get the batch of wrapper messages
+	// REFACTORED: Call queue.RetrieveBatch
+	queuedMessages, err := a.queue.RetrieveBatch(r.Context(), userURN, limit)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to retrieve message batch from store")
+		log.Error().Err(err).Msg("Failed to retrieve message batch from queue")
 		response.WriteJSONError(w, http.StatusInternalServerError, "failed to retrieve messages")
 		return
 	}
 
 	// 2. Wrap them in the native list struct
-	// This list struct will be marshaled to JSON using its custom
-	// MarshalJSON method, which uses our 'queue.pb.go' facade.
 	messageList := &routingTypes.QueuedMessageList{
 		Messages: queuedMessages,
 	}
@@ -156,8 +133,7 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, http.StatusOK, messageList)
 }
 
-// NEW: AcknowledgeMessagesHandler implements the "ack" part of the "Reliable Dumb Queue".
-// It receives a list of internal message IDs and deletes them from the queue.
+// AcknowledgeMessagesHandler implements the "ack" part of the queue.
 func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
@@ -182,26 +158,22 @@ func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	if len(ackBody.MessageIDs) == 0 {
-		// Technically not an error, just nothing to do.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	log := a.logger.With().Str("user", userURN.String()).Int("count", len(ackBody.MessageIDs)).Logger()
 
-	// 2. Call the store to delete the messages
-	// This is a fire-and-forget from the client's perspective.
-	// We'll run the actual delete in a background goroutine to
-	// return the response to the client immediately.
+	// 2. Call the queue to delete the messages
+	// This runs in a background goroutine.
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		// Create a new background context
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		if err := a.store.AcknowledgeMessages(ctx, userURN, ackBody.MessageIDs); err != nil {
-			// Log the error, but the client has already moved on.
+		// REFACTORED: Call queue.Acknowledge
+		if err := a.queue.Acknowledge(ctx, userURN, ackBody.MessageIDs); err != nil {
 			log.Error().Err(err).Msg("Failed to acknowledge/delete messages in background")
 		} else {
 			log.Info().Msg("Successfully acknowledged messages in background")

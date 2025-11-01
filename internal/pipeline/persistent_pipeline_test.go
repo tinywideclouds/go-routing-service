@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
-	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -63,16 +63,6 @@ func (m *mockTokenFetcher) Close() error {
 	return args.Error(0)
 }
 
-// NEW: Added mock for PushNotifier
-type mockPushNotifier struct {
-	mock.Mock
-}
-
-func (m *mockPushNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
-	args := m.Called(ctx, tokens, envelope)
-	return args.Error(0)
-}
-
 // NEW: This is the struct we now store in Firestore
 type storedMessageForTest struct {
 	QueuedAt time.Time                  `firestore:"queued_at"`
@@ -103,7 +93,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 
 	// 3. Arrange: Create Dependencies
 	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]() // User is offline
-	store, err := persistence.NewFirestoreStore(fsClient, logger)
+	store, err := queue.NewFirestoreStore(fsClient, logger)
 	require.NoError(t, err)
 
 	tokenFetcher := new(mockTokenFetcher)

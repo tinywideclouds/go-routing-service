@@ -37,6 +37,7 @@ import (
 	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	psub "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/websocket"
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/internal/realtime"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice"
@@ -369,7 +370,7 @@ func assembleTestDependencies(
 	}
 
 	// Stores and Caches
-	messageStore, err := persistence.NewFirestoreStore(fsClient, logger)
+	messageStore, err := queue.NewFirestoreStore(fsClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create firestore store for test: %w", err)
 	}

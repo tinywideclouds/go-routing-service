@@ -27,8 +27,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
-	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/websocket"
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -69,7 +69,7 @@ func TestOnlinePath_Integration(t *testing.T) {
 	// --- END FIX ---
 
 	// REFACTORED: Use new MessageStore
-	store, err := persistence.NewFirestoreStore(fsClient, logger)
+	store, err := queue.NewFirestoreStore(fsClient, logger)
 	require.NoError(t, err)
 
 	deliveryTopicID := "delivery-topic-" + runID

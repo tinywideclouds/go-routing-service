@@ -1,8 +1,7 @@
 /*
 File: routingservice/routingservice.go
-Description: REFACTORED to correctly use the standard '*http.ServeMux'
-provided by 'baseServer.Mux()'. This removes the non-existent
-'.Use()' and '.Post()' methods and uses 'mux.Handle()' instead.
+Description: REFACTORED to use the new 'routing.ServiceDependencies'
+struct and remove all references to the old delivery pipeline.
 */
 package routingservice
 
@@ -26,7 +25,6 @@ import (
 // Wrapper now embeds BaseServer to get standard server functionality.
 type Wrapper struct {
 	*microservice.BaseServer
-	// REFACTORED: Updated generic type
 	processingService *messagepipeline.StreamingService[secure.SecureEnvelope]
 	apiHandler        *api.API
 	logger            zerolog.Logger
@@ -35,7 +33,7 @@ type Wrapper struct {
 // New creates and wires up the entire routing service using the base server.
 func New(
 	cfg *config.AppConfig,
-	dependencies *routing.Dependencies,
+	dependencies *routing.ServiceDependencies, // REFACTORED: Use new struct
 	authMiddleware func(http.Handler) http.Handler,
 	logger zerolog.Logger,
 ) (*Wrapper, error) {
@@ -44,9 +42,10 @@ func New(
 	baseServer := microservice.NewBaseServer(logger, ":"+cfg.APIPort)
 
 	// 2. Create the API handlers.
+	// REFACTORED: Pass the new 'MessageQueue'
 	apiHandler := api.NewAPI(
 		dependencies.IngestionProducer,
-		dependencies.MessageStore,
+		dependencies.MessageQueue,
 		logger.With().Str("component", "API").Logger(),
 	)
 
@@ -57,26 +56,19 @@ func New(
 	}
 
 	// 4. Create the router and attach handlers.
-	// --- THIS IS THE FIX ---
-	// We get the standard *http.ServeMux from the base server.
 	mux := baseServer.Mux()
 
-	// Create http.HandlerFuncs from our apiHandler methods
 	sendHandler := http.HandlerFunc(apiHandler.SendHandler)
 	batchHandler := http.HandlerFunc(apiHandler.GetMessageBatchHandler)
 	ackHandler := http.HandlerFunc(apiHandler.AcknowledgeMessagesHandler)
 
-	// Apply the auth middleware to each handler individually
 	authedSendHandler := authMiddleware(sendHandler)
 	authedBatchHandler := authMiddleware(batchHandler)
 	authedAckHandler := authMiddleware(ackHandler)
 
-	// Register the *authed* handlers with the mux.
-	// We use the Go 1.22+ method-based routing patterns.
 	mux.Handle("POST /api/send", authedSendHandler)
 	mux.Handle("GET /api/messages", authedBatchHandler)
 	mux.Handle("POST /api/messages/ack", authedAckHandler)
-	// --- END FIX ---
 
 	return &Wrapper{
 		BaseServer:        baseServer,
@@ -87,10 +79,9 @@ func New(
 }
 
 // newProcessingService builds the main message processing pipeline.
-// REFACTORED: Updated generic type
 func newProcessingService(
 	cfg *config.AppConfig,
-	dependencies *routing.Dependencies,
+	dependencies *routing.ServiceDependencies, // REFACTORED: Use new struct
 	logger zerolog.Logger,
 ) (*messagepipeline.StreamingService[secure.SecureEnvelope], error) {
 
