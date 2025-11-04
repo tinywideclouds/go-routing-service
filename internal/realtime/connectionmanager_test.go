@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"strings"
+	"sync" // NEW: Import
 	"testing"
 	"time"
 
@@ -88,6 +89,7 @@ type testFixture struct {
 	messageQueue  *mockMessageQueue
 	wsServer      *httptest.Server
 	userURN       urn.URN
+	wg            *sync.WaitGroup // NEW: To signal disconnect completion
 }
 
 // setup creates a test fixture for the ConnectionManager.
@@ -122,6 +124,7 @@ func setup(t *testing.T) *testFixture {
 		messageQueue:  messageQueue,
 		wsServer:      wsServer,
 		userURN:       userURN,
+		wg:            &sync.WaitGroup{}, // NEW: Initialize the WaitGroup
 	}
 }
 
@@ -137,11 +140,13 @@ func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	require.NoError(t, err, "Failed to dial test WebSocket server")
 	t.Cleanup(func() { _ = wsClientConn.Close() })
 
-	// Wait for the connection to be registered (seems bad we need to increase this for github workflow to work...)
+	// Wait for the connection to be registered
+	// This 'Eventually' is fine because it's polling for the *result*
+	// of the synchronous Dial call, not racing an async goroutine.
 	require.Eventually(t, func() bool {
 		_, ok := fx.cm.connections.Load(fx.userURN.String())
 		return ok
-	}, 8*time.Second, 10*time.Millisecond, "User connection was not registered")
+	}, 2*time.Second, 10*time.Millisecond, "User connection was not registered")
 
 	return wsClientConn
 }
@@ -160,20 +165,44 @@ func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
 	fx.presenceCache.AssertCalled(t, "Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo"))
 
 	// --- 2. Test Disconnect ---
+
+	// NEW: Tell the WaitGroup we are waiting for one signal
+	fx.wg.Add(1)
+
 	// Mock expectations for 'Remove'
 	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
-	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).Return(nil).Once()
+
+	// NEW: Tell the *last* call in Remove() to signal the WaitGroup
+	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
+		Return(nil).
+		Run(func(args mock.Arguments) {
+			fx.wg.Done() // <-- THIS IS THE SIGNAL
+		}).
+		Once()
 
 	// Close the client connection to trigger the server's read loop exit
 	err := wsClientConn.Close()
 	require.NoError(t, err)
 
-	// Wait for 'Remove' to be called
-	require.Eventually(t, func() bool {
-		// Check that the mocks were called
-		return fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN) &&
-			fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
-	}, 2*time.Second, 10*time.Millisecond, "Remove() logic was not fully triggered")
+	// --- NEW: Wait for the signal with a timeout ---
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fx.wg.Wait() // Wait for wg.Done() to be called
+	}()
+
+	select {
+	case <-done:
+		// Success! The disconnect was processed.
+	case <-time.After(5 * time.Second): // 5s is a generous but safe timeout
+		t.Fatal("Test timed out waiting for disconnect to be processed")
+	}
+	// --- END NEW ---
+
+	// Now that we've waited, we can assert deterministically.
+	// No 'Eventually' is needed.
+	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
+	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
 
 	// Assert connection is gone from the map
 	_, ok := fx.cm.connections.Load(fx.userURN.String())
@@ -184,13 +213,35 @@ func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
 	fx := setup(t)
 	testErr := errors.New("migration failed")
 
+	// --- We can use the same WaitGroup pattern here for consistency ---
+	fx.wg.Add(1)
+
 	// Mock expectations for 'Remove'
 	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
 	// --- This is the failure ---
-	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).Return(testErr).Once()
+	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
+		Return(testErr).
+		Run(func(args mock.Arguments) {
+			fx.wg.Done() // <-- Still signal completion
+		}).
+		Once()
 
 	// Manually call Remove (as if a disconnect happened)
 	fx.cm.Remove(fx.userURN)
+
+	// --- Wait for the signal ---
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fx.wg.Wait()
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second): // Shorter timeout is fine, this is synchronous
+		t.Fatal("Test timed out waiting for Remove to complete")
+	}
 
 	// Assert all mocks were called
 	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
