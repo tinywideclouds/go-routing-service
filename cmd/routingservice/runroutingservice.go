@@ -65,8 +65,14 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to finalize configuration with environment overrides")
 	}
 
+	// I really hate what google did with ps v2
+	cfg.IngressTopicID = convertPubsub(cfg.ProjectID, cfg.IngressTopicID, Pub)
+	cfg.IngressSubscriptionID = convertPubsub(cfg.ProjectID, cfg.IngressSubscriptionID, Sub)
+	cfg.IngressTopicDLQID = convertPubsub(cfg.ProjectID, cfg.IngressTopicDLQID, Pub)
+
 	// 5. Create dependencies
 	ctx := context.Background()
+
 	deps, err := newDependencies(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize dependencies")
@@ -130,6 +136,11 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger zero
 	psClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to pubsub: %w", err)
+	}
+
+	err = ensureTopics(ctx, cfg, psClient, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	// --- Create new Queue components ---
@@ -222,31 +233,50 @@ func newHotQueue(ctx context.Context, cfg *config.AppConfig, fsClient *firestore
 
 // --- Production Dependency Constructors (unchanged) ---
 
+func ensureTopics(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger zerolog.Logger) error {
+	ingressTopic := &pubsubpb.Topic{
+		Name: cfg.IngressTopicID,
+	}
+	_, err := psClient.TopicAdminClient.CreateTopic(ctx, ingressTopic)
+	if err != nil {
+		if status.Code(err) != codes.AlreadyExists {
+			logger.Err(err).Msg("pubsub error")
+			return fmt.Errorf("could not create topic: %s", cfg.IngressTopicID)
+		}
+	}
+
+	ingressTopicDLQ := &pubsubpb.Topic{
+		Name: cfg.IngressTopicDLQID,
+	}
+	_, err = psClient.TopicAdminClient.CreateTopic(ctx, ingressTopicDLQ)
+	if err != nil {
+		if status.Code(err) != codes.AlreadyExists {
+			logger.Err(err).Msg("pubsub error")
+			return fmt.Errorf("could not create topic: %s", cfg.IngressTopicDLQID)
+		}
+	}
+	return nil
+}
+
 func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger zerolog.Logger) (messagepipeline.MessageConsumer, error) {
-	topicPath := fmt.Sprintf("projects/%s/topics/%s", cfg.ProjectID, cfg.IngressTopicID)
-	subPath := fmt.Sprintf("projects/%s/subscriptions/%s", cfg.ProjectID, cfg.IngressSubscriptionID)
-	dlqTopicPath := fmt.Sprintf("projects/%s/topics/%s", cfg.ProjectID, cfg.IngressTopicDLQID)
 	subConfig := &pubsubpb.Subscription{
-		Name:               subPath,
-		Topic:              topicPath,
+		Name:               cfg.IngressSubscriptionID,
+		Topic:              cfg.IngressTopicID,
 		AckDeadlineSeconds: 10,
 		DeadLetterPolicy: &pubsubpb.DeadLetterPolicy{
-			DeadLetterTopic:     dlqTopicPath,
+			DeadLetterTopic:     cfg.IngressTopicDLQID,
 			MaxDeliveryAttempts: 5,
 		},
 		EnableMessageOrdering: false,
 	}
-	sub, err := psClient.SubscriptionAdminClient.GetSubscription(ctx, &pubsubpb.GetSubscriptionRequest{Subscription: subPath})
+	sub, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, subConfig)
 	if err != nil {
-		if status.Code(err) != codes.NotFound {
-			return nil, fmt.Errorf("failed to get subscription %s: %w", subPath, err)
-		}
-		logger.Info().Str("subscription", subPath).Msg("Subscription not found, creating it...")
-		sub, err = psClient.SubscriptionAdminClient.CreateSubscription(ctx, subConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create subscription %s: %w", subPath, err)
+		if status.Code(err) != codes.AlreadyExists {
+			logger.Err(err).Msg("pubsub error")
+			return nil, fmt.Errorf("could not create sub: %s", cfg.IngressSubscriptionID)
 		}
 	}
+
 	return messagepipeline.NewGooglePubsubConsumer(
 		messagepipeline.NewGooglePubsubConsumerDefaults(sub.Name), psClient, logger,
 	)
@@ -289,4 +319,15 @@ func newPushNotifier(cfg *config.AppConfig, psClient *pubsub.Client, logger zero
 		return nil, err
 	}
 	return push.NewPubSubNotifier(pushProducer, logger)
+}
+
+type PS string
+
+const (
+	Sub PS = "subscriptions"
+	Pub PS = "topics"
+)
+
+func convertPubsub(project, id string, ps PS) string {
+	return fmt.Sprintf("projects/%s/%s/%s", project, ps, id)
 }
