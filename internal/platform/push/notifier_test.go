@@ -1,5 +1,3 @@
-//go:build unit
-
 /*
 File: internal/platform/push/notifier_test.go
 Description: NEW unit test for the PubSubNotifier.

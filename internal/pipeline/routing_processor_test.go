@@ -1,5 +1,3 @@
-//go:build unit
-
 /*
 File: internal/pipeline/routing_processor_test.go
 Description: REFACTORED to test the new 'queue.MessageQueue'

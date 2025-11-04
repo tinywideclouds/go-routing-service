@@ -1,13 +1,13 @@
 /*
 File: cmd/runroutingservice/runroutingservice.go
-Description: REFACTORED to remove the 'local' run_mode and the
-'NewFakeDependencies' function. The service now always
-builds production dependencies.
+Description: REFACTORED to use the standard two-stage config
+loading pattern (embed, Stage 1, Stage 2).
 */
 package main
 
 import (
 	"context"
+	_ "embed" // Required for go:embed
 	"fmt"
 	"net/http"
 
@@ -15,11 +15,12 @@ import (
 	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
+	// CORRECTED IMPORT:
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/tinywideclouds/go-routing-service/cmd"
+	// "github.com/tinywideclouds/go-routing-service/cmd" // No longer needed
 	"github.com/tinywideclouds/go-routing-service/internal/app"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	psub "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
@@ -32,38 +33,52 @@ import (
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"gopkg.in/yaml.v3" // Added for unmarshaling
 
-	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 )
+
+//go:embed config.yaml
+var configFile []byte
 
 func main() {
 	// 1. Setup structured logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	logger := log.With().Str("service", "go-routing-service").Logger()
 
-	// 2. Load config.yaml
-	cfg, err := cmd.Load()
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to load configuration")
+	// 2. Load Configuration (Stage 0: Unmarshal)
+	var yamlCfg config.YamlConfig
+	if err := yaml.Unmarshal(configFile, &yamlCfg); err != nil {
+		logger.Fatal().Err(err).Msg("Failed to unmarshal embedded yaml config")
 	}
 
-	// 3. Create dependencies
+	// 3. Build Base Config (Stage 1: YAML to Base Struct)
+	baseCfg, err := config.NewConfigFromYaml(&yamlCfg)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to build base configuration from YAML")
+	}
+
+	// 4. Apply Overrides & Validate (Stage 2: Env Vars)
+	cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to finalize configuration with environment overrides")
+	}
+
+	// 5. Create dependencies
 	ctx := context.Background()
-	// REFACTORED: Call newDependencies directly
 	deps, err := newDependencies(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize dependencies")
 	}
 
-	// 4. Create Authentication Middleware
+	// 6. Create Authentication Middleware
 	authMiddleware, err := newAuthMiddleware(cfg, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize authentication middleware")
 	}
 
-	// 5. Create the two main services
+	// 7. Create the two main services
 	apiService, err := routingservice.New(
 		cfg,
 		deps,
@@ -75,7 +90,7 @@ func main() {
 	}
 
 	connManager, err := realtime.NewConnectionManager(
-		cfg.WebSocketPort,
+		":"+cfg.WebSocketPort, // Prepend ':'
 		authMiddleware,
 		deps.PresenceCache,
 		deps.MessageQueue,
@@ -85,7 +100,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to create Connection Manager")
 	}
 
-	// 6. Run the application
+	// 8. Run the application
 	app.Run(ctx, logger, apiService, connManager)
 }
 
@@ -99,14 +114,11 @@ func newAuthMiddleware(cfg *config.AppConfig, logger zerolog.Logger) (func(http.
 }
 
 // newDependencies builds the service dependency container.
-// REFACTORED: Removed 'local' run_mode check.
 func newDependencies(ctx context.Context, cfg *config.AppConfig, logger zerolog.Logger) (*routing.ServiceDependencies, error) {
 	// Always builds production dependencies.
 	// Emulators are handled via environment variables, not a config flag.
 	return newProdDependencies(ctx, cfg, logger)
 }
-
-// DELETED: NewFakeDependencies(ctx, cfg, logger)
 
 // newProdDependencies creates real, production-ready dependencies.
 func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger zerolog.Logger) (*routing.ServiceDependencies, error) {
@@ -152,7 +164,7 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger zero
 	if err != nil {
 		return nil, err
 	}
-	pushNotifier, err := newPushNotifier(ctx, cfg, psClient, logger)
+	pushNotifier, err := newPushNotifier(cfg, psClient, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +203,7 @@ func newHotQueue(ctx context.Context, cfg *config.AppConfig, fsClient *firestore
 		// Use the production Redis-backed hot queue
 		redisAddr := cfg.HotQueue.Redis.Addr
 		if redisAddr == "" {
-			return nil, fmt.Errorf("hot_queue type is redis but no address is configured")
+			return nil, fmt.Errorf("hot_queue type is redis but no address is configured (check REDIS_ADDR env var)")
 		}
 		rdb := redis.NewClient(&redis.Options{
 			Addr: redisAddr,
@@ -268,7 +280,8 @@ func newFirestoreTokenFetcher(ctx context.Context, cfg *config.AppConfig, fsClie
 	return persistence.NewURNTokenFetcherAdapter(stringTokenFetcher), nil
 }
 
-func newPushNotifier(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger zerolog.Logger) (routing.PushNotifier, error) {
+// CORRECTED:
+func newPushNotifier(cfg *config.AppConfig, psClient *pubsub.Client, logger zerolog.Logger) (routing.PushNotifier, error) {
 	pushProducer, err := messagepipeline.NewGooglePubsubProducer(
 		messagepipeline.NewGooglePubsubProducerDefaults(cfg.PushNotificationsTopicID), psClient, logger,
 	)

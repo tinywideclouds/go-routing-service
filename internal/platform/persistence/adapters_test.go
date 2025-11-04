@@ -1,5 +1,3 @@
-//go:build unit
-
 /*
 File: internal/platform/persistence/adapters_test.go
 Description: NEW unit test for the persistence adapters.

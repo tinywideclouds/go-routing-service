@@ -11,7 +11,7 @@ on:
 env:
   # --- CHANGED ---
   IMAGE_NAME: 'ghcr.io/tinywideclouds/go-routing-service'
-  MAIN_PACKAGE_PATH: './cmd/runroutingservice'
+  MAIN_PACKAGE_PATH: './cmd/routingservice/runroutingservice'
   # --- END CHANGES ---
 
 permissions:

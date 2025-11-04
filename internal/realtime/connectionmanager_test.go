@@ -1,5 +1,3 @@
-//go:build unit
-
 /*
 File: internal/realtime/connectionmanager_test.go
 Description: REFACTORED to remove all tests for the delivery pipeline.

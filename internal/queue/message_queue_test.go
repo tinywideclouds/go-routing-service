@@ -1,5 +1,3 @@
-//go:build unit
-
 /*
 File: internal/queue/composite_queue_test.go
 Description: NEW FILE. Unit test for the CompositeMessageQueue.

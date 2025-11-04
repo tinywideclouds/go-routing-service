@@ -1,16 +1,16 @@
 package config
 
+// --- YAML-Specific Structs ---
+
 type YamlRedisConfig struct {
 	Addr string `yaml:"addr"`
 }
 
-// YamlFirestoreConfig now supports the two-collection model
 type YamlFirestoreConfig struct {
 	MainCollectionName    string `yaml:"main_collection_name"`
 	PendingCollectionName string `yaml:"pending_collection_name"`
 }
 
-// YamlHotQueueConfig now holds both types
 type YamlHotQueueConfig struct {
 	Type      string              `yaml:"type"` // "firestore" or "redis"
 	Redis     YamlRedisConfig     `yaml:"redis"`
@@ -20,7 +20,7 @@ type YamlHotQueueConfig struct {
 type YamlPresenceCacheConfig struct {
 	Type      string              `yaml:"type"`
 	Redis     YamlRedisConfig     `yaml:"redis"`
-	Firestore YamlFirestoreConfig `yaml:"firestore"` // Note: This Firestore config is simpler
+	Firestore YamlFirestoreConfig `yaml:"firestore"`
 }
 
 type YamlCorsConfig struct {
@@ -46,22 +46,28 @@ type YamlConfig struct {
 	NumPipelineWorkers       int                     `yaml:"num_pipeline_workers"`
 }
 
-// --- Application Config Struct ---
+// --- Stage 1 Function ---
 
-// AppConfig is the canonical, validated configuration object used throughout the application.
-type AppConfig struct {
-	ProjectID                string
-	RunMode                  string
-	APIPort                  string
-	WebSocketPort            string
-	IdentityServiceURL       string
-	Cors                     YamlCorsConfig
-	PresenceCache            YamlPresenceCacheConfig
-	HotQueue                 YamlHotQueueConfig
-	ColdQueueCollection      string
-	IngressTopicID           string
-	IngressSubscriptionID    string
-	IngressTopicDLQID        string
-	PushNotificationsTopicID string
-	NumPipelineWorkers       int
+// NewConfigFromYaml converts the raw unmarshaled data (YamlConfig) into a clean, base AppConfig struct.
+// Stage 1 complete: The AppConfig struct now exists, but without environment overrides.
+func NewConfigFromYaml(yamlCfg *YamlConfig) (*AppConfig, error) {
+	// This mapping is 1:1, as AppConfig matches YamlConfig
+	appCfg := &AppConfig{
+		ProjectID:                yamlCfg.ProjectID,
+		RunMode:                  yamlCfg.RunMode,
+		APIPort:                  yamlCfg.APIPort,
+		WebSocketPort:            yamlCfg.WebSocketPort,
+		IdentityServiceURL:       yamlCfg.IdentityServiceURL,
+		Cors:                     yamlCfg.Cors,
+		PresenceCache:            yamlCfg.PresenceCache,
+		HotQueue:                 yamlCfg.HotQueue,
+		ColdQueueCollection:      yamlCfg.ColdQueueCollection,
+		IngressTopicID:           yamlCfg.IngressTopicID,
+		IngressSubscriptionID:    yamlCfg.IngressSubscriptionID,
+		IngressTopicDLQID:        yamlCfg.IngressTopicDLQID,
+		PushNotificationsTopicID: yamlCfg.PushNotificationsTopicID,
+		NumPipelineWorkers:       yamlCfg.NumPipelineWorkers,
+	}
+
+	return appCfg, nil
 }
