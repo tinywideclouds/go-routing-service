@@ -1,7 +1,7 @@
 /*
 File: routingservice/routingservice.go
-Description: REFACTORED to use the new 'routing.ServiceDependencies'
-struct and remove all references to the old delivery pipeline.
+Description: REFACTORED to add a discoverable /service-info
+endpoint and apply CORS middleware to all handlers.
 */
 package routingservice
 
@@ -19,6 +19,8 @@ import (
 
 	// REFACTORED: Use new base server and platform types
 	"github.com/tinywideclouds/go-microservice-base/pkg/microservice"
+	"github.com/tinywideclouds/go-microservice-base/pkg/middleware" // *** NEW ***
+	"github.com/tinywideclouds/go-microservice-base/pkg/response"   // *** NEW ***
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -42,7 +44,6 @@ func New(
 	baseServer := microservice.NewBaseServer(logger, ":"+cfg.APIPort)
 
 	// 2. Create the API handlers.
-	// REFACTORED: Pass the new 'MessageQueue'
 	apiHandler := api.NewAPI(
 		dependencies.IngestionProducer,
 		dependencies.MessageQueue,
@@ -55,7 +56,15 @@ func New(
 		return nil, fmt.Errorf("failed to create processing service: %w", err)
 	}
 
-	// 4. Create the router and attach handlers.
+	// 4. *** NEW: Create CORS Middleware ***
+	// Use the config to create the middleware
+	corsCfg := middleware.CorsConfig{
+		AllowedOrigins: cfg.Cors.AllowedOrigins,
+		Role:           middleware.CorsRole(cfg.Cors.Role), // Cast string to CorsRole
+	}
+	corsMiddleware := middleware.NewCorsMiddleware(corsCfg)
+
+	// 5. Get the router and attach handlers.
 	mux := baseServer.Mux()
 
 	sendHandler := http.HandlerFunc(apiHandler.SendHandler)
@@ -66,9 +75,36 @@ func New(
 	authedBatchHandler := authMiddleware(batchHandler)
 	authedAckHandler := authMiddleware(ackHandler)
 
-	mux.Handle("POST /api/send", authedSendHandler)
-	mux.Handle("GET /api/messages", authedBatchHandler)
-	mux.Handle("POST /api/messages/ack", authedAckHandler)
+	// *** NEW: Apply CORS to all handlers ***
+	mux.Handle("POST /api/send", corsMiddleware(authedSendHandler))
+	mux.Handle("GET /api/messages", corsMiddleware(authedBatchHandler))
+	mux.Handle("POST /api/messages/ack", corsMiddleware(authedAckHandler))
+
+	// *** NEW: Add OPTIONS handlers for API routes ***
+	apiOptionsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.Handle("OPTIONS /api/send", corsMiddleware(apiOptionsHandler))
+	mux.Handle("OPTIONS /api/messages", corsMiddleware(apiOptionsHandler))
+	mux.Handle("OPTIONS /api/messages/ack", corsMiddleware(apiOptionsHandler))
+
+	// 6. *** NEW: Define and register the discovery handler ***
+	type serviceInfoPayload struct {
+		WebSocketPort string `json:"webSocketPort"`
+		APIPort       string `json:"apiPort"`
+	}
+	info := serviceInfoPayload{
+		WebSocketPort: cfg.WebSocketPort,
+		APIPort:       cfg.APIPort,
+	}
+
+	serviceInfoHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response.WriteJSON(w, http.StatusOK, info)
+	})
+
+	// Register the new handler on a "well-known" path
+	mux.Handle("/.well-known/service-info", corsMiddleware(serviceInfoHandler))
+	mux.Handle("OPTIONS /.well-known/service-info", corsMiddleware(apiOptionsHandler))
 
 	return &Wrapper{
 		BaseServer:        baseServer,

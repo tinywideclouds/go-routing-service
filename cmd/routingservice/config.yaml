@@ -21,14 +21,27 @@ cors:
 presence_cache:
   type: "firestore"
   firestore:
-    collection_name: "presence"
+    main_collection_name: "presence" # Renamed from collection_name
+
+# --- NEW QUEUE DEFINITIONS ---
+
+cold_queue_collection: "cold-queue"
+
+hot_queue:
+  type: "firestore" # Use firestore for simple local dev
+  redis:
+    addr: "" # Not used when type is firestore
+  firestore:
+    main_collection_name: "hot-queue-main"
+    pending_collection_name: "hot-queue-pending"
+
+# --- END QUEUE DEFINITIONS ---
 
 # Google Cloud Pub/Sub Topics and Subscriptions.
 ingress_topic_id: "ingress-topic"
 ingress_subscription_id: "ingress-sub"
 ingress_topic_dlq_id: "ingress-topic-dlq"
-delivery_topic_id: "delivery-notifications"
 push_notifications_topic_id: "push-notifications"
 
-# Google Cloud requires a minimum value of 24 hours for ephemeral subscriptions.
-delivery_bus_sub_expiration: "24h"
+# Number of concurrent workers processing the ingress pipeline
+num_pipeline_workers: 10
