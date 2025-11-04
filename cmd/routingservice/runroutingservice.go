@@ -269,7 +269,7 @@ func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *
 		},
 		EnableMessageOrdering: false,
 	}
-	sub, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, subConfig)
+	_, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, subConfig)
 	if err != nil {
 		if status.Code(err) != codes.AlreadyExists {
 			logger.Err(err).Msg("pubsub error")
@@ -278,7 +278,7 @@ func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *
 	}
 
 	return messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(sub.Name), psClient, logger,
+		messagepipeline.NewGooglePubsubConsumerDefaults(subConfig.Name), psClient, logger,
 	)
 }
 
