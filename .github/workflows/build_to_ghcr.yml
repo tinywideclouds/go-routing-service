@@ -1,0 +1,69 @@
+# .github/workflows/build-routing-service.yml
+
+name: 'Build and Push Routing Service'
+
+on:
+  push:
+    branches:
+      - 'main'
+  workflow_dispatch:
+
+env:
+  # --- CHANGED ---
+  IMAGE_NAME: 'ghcr.io/tinywideclouds/go-routing-service'
+  MAIN_PACKAGE_PATH: './cmd/runroutingservice'
+  # --- END CHANGES ---
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Get the code
+      - name: 'Checkout code'
+        uses: actions/checkout@v4.1.7
+
+      # 2. Set up Go
+      - name: 'Set up Go'
+        uses: actions/setup-go@v6.0.0
+        with:
+          go-version: '1.24'
+
+      # 3. Run unit tests
+      - name: 'Run Go Tests'
+        run: go test ./...
+
+      # 4. Log in to GHCR
+      - name: 'Log in to GHCR'
+        uses: docker/login-action@v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 5. Install the 'pack' CLI
+      - name: 'Install Pack CLI'
+        uses: buildpacks/github-actions/setup-pack@v5.9.6
+
+      # 6. Build and Push image using Buildpacks
+      # This step works perfectly with the new env vars
+      - name: 'Build and Push Image (SHA)'
+        run: |
+          pack build ${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --builder gcr.io/buildpacks/builder:v1 \
+            --path . \
+            --env GOOGLE_BUILDABLE=${{ env.MAIN_PACKAGE_PATH }} \
+            --publish
+
+      # 7. Tag and Push 'latest'
+      - name: 'Tag and Push "latest"'
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker pull ${{ env.IMAGE_NAME }}:${{ github.sha }} 
+          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.IMAGE_NAME }}:latest
+          echo "Pushed latest tag: ${{ env.IMAGE_NAME }}:latest"
