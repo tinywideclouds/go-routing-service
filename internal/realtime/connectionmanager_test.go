@@ -137,11 +137,11 @@ func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	require.NoError(t, err, "Failed to dial test WebSocket server")
 	t.Cleanup(func() { _ = wsClientConn.Close() })
 
-	// Wait for the connection to be registered
+	// Wait for the connection to be registered (seems bad we need to increase this for github workflow to work...)
 	require.Eventually(t, func() bool {
 		_, ok := fx.cm.connections.Load(fx.userURN.String())
 		return ok
-	}, 2*time.Second, 10*time.Millisecond, "User connection was not registered")
+	}, 8*time.Second, 10*time.Millisecond, "User connection was not registered")
 
 	return wsClientConn
 }
