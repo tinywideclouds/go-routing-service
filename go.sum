@@ -280,8 +280,8 @@ github.com/testcontainers/testcontainers-go v0.38.0 h1:d7uEapLcv2P8AvH8ahLqDMMxd
 github.com/testcontainers/testcontainers-go v0.38.0/go.mod h1:C52c9MoHpWO+C4aqmgSU+hxlR5jlEayWtgYrb8Pzz1w=
 github.com/tinywideclouds/gen-platform v0.0.2 h1:fvwPzy4FM5Gc+FxrGOoFDyYC2vFGT+AEX1UovTid7dY=
 github.com/tinywideclouds/gen-platform v0.0.2/go.mod h1:COG3BwD4rMgdquKXsTui0nNaI9w/b4hbgmBVDOjwGqg=
-github.com/tinywideclouds/go-microservice-base v0.0.1 h1:IaoRxjg/anhbrV3NG0T3v1iBWAZRlqNtavup8HWYUf8=
-github.com/tinywideclouds/go-microservice-base v0.0.1/go.mod h1:wmPQFHoVzwbdZxIklNk3wXz2/CGUjdvTmOqAAzSXm1g=
+github.com/tinywideclouds/go-microservice-base v0.0.2 h1:SOeppKlsSY2RycOJEOnAQFpy3GPWn2SwVQY6Nq2csLc=
+github.com/tinywideclouds/go-microservice-base v0.0.2/go.mod h1:wmPQFHoVzwbdZxIklNk3wXz2/CGUjdvTmOqAAzSXm1g=
 github.com/tinywideclouds/go-platform v0.0.5 h1:vRexOezAv9JjDDBD+mP5LfQi7bIts5BG6jg3qlViaM0=
 github.com/tinywideclouds/go-platform v0.0.5/go.mod h1:v5SPJs5Hx+0JPJk2axiHmnISkE7SDWt/JcBD5QT/2Yo=
 github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFAEVmqU=

@@ -1,21 +1,27 @@
 /*
 File: internal/realtime/connectionmanager_test.go
-Description: REFACTORED to remove all tests for the delivery pipeline.
-It now tests that 'Remove' correctly calls the new
-'MessageQueue.MigrateHotToCold' method.
+Description: REFACTORED to be a true integration test.
+It now uses a real mock JWKS server and the *real*
+NewJWKSWebsocketAuthMiddleware, removing NoopAuth.
 */
 package realtime
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync" // NEW: Import
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -82,14 +88,43 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 	return args.Error(0)
 }
 
-// testFixture holds all the components for a test.
+// --- NEW: Test Helpers (from jwt_test.go) ---
+const testKeyID = "test-key-id-1"
+
+func createTestRS256Token(t *testing.T, userID, keyID string, privateKey *rsa.PrivateKey) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": userID,
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	token.Header["kid"] = keyID
+	return token.SignedString(privateKey)
+}
+
+func newMockJWKSServer(t *testing.T, keyID string, publicKey *rsa.PublicKey) *httptest.Server {
+	t.Helper()
+	jwkKey, err := jwk.FromRaw(publicKey)
+	require.NoError(t, err)
+	require.NoError(t, jwkKey.Set(jwk.KeyIDKey, keyID))
+	require.NoError(t, jwkKey.Set(jwk.AlgorithmKey, "RS256"))
+	keySet := jwk.NewSet()
+	require.NoError(t, keySet.AddKey(jwkKey))
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		err := json.NewEncoder(w).Encode(keySet)
+		require.NoError(t, err)
+	}))
+}
+
+// --- REFACTORED: testFixture ---
 type testFixture struct {
 	cm            *ConnectionManager
 	presenceCache *mockPresenceCache
 	messageQueue  *mockMessageQueue
 	wsServer      *httptest.Server
 	userURN       urn.URN
-	wg            *sync.WaitGroup // NEW: To signal disconnect completion
+	wg            *sync.WaitGroup
+	token         string // NEW: Store the valid token
 }
 
 // setup creates a test fixture for the ConnectionManager.
@@ -101,10 +136,26 @@ func setup(t *testing.T) *testFixture {
 	presenceCache := new(mockPresenceCache)
 	messageQueue := new(mockMessageQueue)
 
-	// 2. Create ConnectionManager
+	// --- NEW: Create Real Auth ---
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	mockJWKSServer := newMockJWKSServer(t, testKeyID, &privateKey.PublicKey)
+	t.Cleanup(mockJWKSServer.Close)
+
+	// Create the *real* WebSocket auth middleware
+	authMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(mockJWKSServer.URL)
+	require.NoError(t, err)
+
+	// Create a valid token
+	userURNStr := "urn:sm:user:test-user-id"
+	token, err := createTestRS256Token(t, userURNStr, testKeyID, privateKey)
+	require.NoError(t, err)
+	// --- END NEW AUTH ---
+
+	// 2. Create ConnectionManager (now with real auth)
 	cm, err := NewConnectionManager(
 		"0",
-		middleware.NoopAuth(true, "test-user-id"),
+		authMiddleware, // <-- Pass in the real (mocked-server) middleware
 		presenceCache,
 		messageQueue,
 		logger,
@@ -115,7 +166,7 @@ func setup(t *testing.T) *testFixture {
 	wsServer := httptest.NewServer(cm.server.Handler)
 	t.Cleanup(wsServer.Close)
 
-	userURN, err := urn.Parse("urn:sm:user:test-user-id")
+	userURN, err := urn.Parse(userURNStr)
 	require.NoError(t, err)
 
 	return &testFixture{
@@ -124,7 +175,8 @@ func setup(t *testing.T) *testFixture {
 		messageQueue:  messageQueue,
 		wsServer:      wsServer,
 		userURN:       userURN,
-		wg:            &sync.WaitGroup{}, // NEW: Initialize the WaitGroup
+		wg:            &sync.WaitGroup{},
+		token:         token, // Store the valid token
 	}
 }
 
@@ -136,13 +188,18 @@ func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	// Mock the 'add' dependencies
 	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil)
 
-	wsClientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	// --- NEW: Add the token to the dialer ---
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 45 * time.Second,
+		Subprotocols:     []string{fx.token}, // Send the token here
+	}
+
+	wsClientConn, _, err := dialer.Dial(wsURL, nil) // Use the custom dialer
 	require.NoError(t, err, "Failed to dial test WebSocket server")
 	t.Cleanup(func() { _ = wsClientConn.Close() })
+	// --- END NEW ---
 
 	// Wait for the connection to be registered
-	// This 'Eventually' is fine because it's polling for the *result*
-	// of the synchronous Dial call, not racing an async goroutine.
 	require.Eventually(t, func() bool {
 		_, ok := fx.cm.connections.Load(fx.userURN.String())
 		return ok
@@ -155,10 +212,10 @@ func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
 	fx := setup(t)
 
 	// --- 1. Test Connect ---
-	// Mock expectations for 'add'
+	// Mock expectations for 'add' (unchanged)
 	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil).Once()
 
-	// Connect the client
+	// Connect the client (this now performs a real auth check)
 	wsClientConn := fx.connectClient(t)
 
 	// Assert 'add' was called
@@ -166,70 +223,19 @@ func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
 
 	// --- 2. Test Disconnect ---
 
-	// NEW: Tell the WaitGroup we are waiting for one signal
+	// (This part is unchanged from your original test)
 	fx.wg.Add(1)
-
-	// Mock expectations for 'Remove'
 	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
-
-	// NEW: Tell the *last* call in Remove() to signal the WaitGroup
 	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
 		Return(nil).
 		Run(func(args mock.Arguments) {
-			fx.wg.Done() // <-- THIS IS THE SIGNAL
+			fx.wg.Done()
 		}).
 		Once()
 
-	// Close the client connection to trigger the server's read loop exit
 	err := wsClientConn.Close()
 	require.NoError(t, err)
 
-	// --- NEW: Wait for the signal with a timeout ---
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fx.wg.Wait() // Wait for wg.Done() to be called
-	}()
-
-	select {
-	case <-done:
-		// Success! The disconnect was processed.
-	case <-time.After(5 * time.Second): // 5s is a generous but safe timeout
-		t.Fatal("Test timed out waiting for disconnect to be processed")
-	}
-	// --- END NEW ---
-
-	// Now that we've waited, we can assert deterministically.
-	// No 'Eventually' is needed.
-	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
-	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
-
-	// Assert connection is gone from the map
-	_, ok := fx.cm.connections.Load(fx.userURN.String())
-	assert.False(t, ok, "Connection was not removed from map")
-}
-
-func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
-	fx := setup(t)
-	testErr := errors.New("migration failed")
-
-	// --- We can use the same WaitGroup pattern here for consistency ---
-	fx.wg.Add(1)
-
-	// Mock expectations for 'Remove'
-	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
-	// --- This is the failure ---
-	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
-		Return(testErr).
-		Run(func(args mock.Arguments) {
-			fx.wg.Done() // <-- Still signal completion
-		}).
-		Once()
-
-	// Manually call Remove (as if a disconnect happened)
-	fx.cm.Remove(fx.userURN)
-
-	// --- Wait for the signal ---
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -238,15 +244,45 @@ func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
 
 	select {
 	case <-done:
+		// Success!
+	case <-time.After(5 * time.Second):
+		t.Fatal("Test timed out waiting for disconnect to be processed")
+	}
+
+	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
+	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
+	_, ok := fx.cm.connections.Load(fx.userURN.String())
+	assert.False(t, ok, "Connection was not removed from map")
+}
+
+func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
+	fx := setup(t)
+	testErr := errors.New("migration failed")
+
+	fx.wg.Add(1)
+	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
+	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
+		Return(testErr).
+		Run(func(args mock.Arguments) {
+			fx.wg.Done()
+		}).
+		Once()
+
+	fx.cm.Remove(fx.userURN)
+
+	// (Wait logic unchanged)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fx.wg.Wait()
+	}()
+	select {
+	case <-done:
 		// Success
-	case <-time.After(2 * time.Second): // Shorter timeout is fine, this is synchronous
+	case <-time.After(2 * time.Second):
 		t.Fatal("Test timed out waiting for Remove to complete")
 	}
 
-	// Assert all mocks were called
 	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
 	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
-	// The test will log an error, which is the expected behavior.
 }
-
-// DELETED: All tests related to 'deliveryProcessor'

@@ -16,7 +16,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tinywideclouds/gen-platform v0.0.2
-	github.com/tinywideclouds/go-microservice-base v0.0.1
+	github.com/tinywideclouds/go-microservice-base v0.0.2
 	github.com/tinywideclouds/go-platform v0.0.5
 	google.golang.org/api v0.254.0
 	google.golang.org/grpc v1.76.0

@@ -1,7 +1,8 @@
 /*
 File: internal/realtime/connectionmanager.go
-Description: REFACTORED to correctly create and manage its own net.Listener,
-which fixes the GetHTTPPort() helper to return the actual bound port.
+Description: REFACTORED to accept an authMiddleware for the /connect
+endpoint and to correctly pass the Sec-WebSocket-Protocol
+header during the handshake.
 */
 // Package realtime provides components for managing real-time client connections.
 package realtime
@@ -44,7 +45,7 @@ type ConnectionManager struct {
 // NewConnectionManager creates and wires up a new WebSocket connection manager.
 func NewConnectionManager(
 	port string,
-	authMiddleware func(http.Handler) http.Handler,
+	authMiddleware func(http.Handler) http.Handler, // <-- CHANGED: Accepts middleware
 	presenceCache cache.PresenceCache[urn.URN, routing.ConnectionInfo],
 	messageQueue queue.MessageQueue,
 	logger zerolog.Logger,
@@ -70,6 +71,7 @@ func NewConnectionManager(
 	}
 
 	mux := http.NewServeMux()
+	// --- CHANGED: The handler is now protected by the injected auth middleware ---
 	mux.Handle("/connect", authMiddleware(http.HandlerFunc(cm.connectHandler)))
 	cm.server = &http.Server{
 		Handler: mux,
@@ -79,7 +81,6 @@ func NewConnectionManager(
 }
 
 // Start runs the HTTP server for WebSocket connections.
-// --- THIS IS THE FIX ---
 func (cm *ConnectionManager) Start(ctx context.Context) error {
 	addr := cm.port
 	if !strings.HasPrefix(addr, ":") {
@@ -104,10 +105,7 @@ func (cm *ConnectionManager) Start(ctx context.Context) error {
 	return nil
 }
 
-// --- END FIX ---
-
 // Shutdown gracefully stops the HTTP server.
-// --- THIS IS THE FIX ---
 func (cm *ConnectionManager) Shutdown(ctx context.Context) error {
 	cm.logger.Info().Msg("Shutting down WebSocket service...")
 	var finalErr error
@@ -130,10 +128,7 @@ func (cm *ConnectionManager) Shutdown(ctx context.Context) error {
 	return finalErr
 }
 
-// --- END FIX ---
-
 // GetHTTPPort returns the port the server is listening on.
-// --- THIS IS THE FIX ---
 func (cm *ConnectionManager) GetHTTPPort() string {
 	if cm.listener == nil {
 		return ":0" // Not started yet
@@ -147,26 +142,38 @@ func (cm *ConnectionManager) GetHTTPPort() string {
 	return addr[port:]
 }
 
-// --- END FIX ---
-
 // connectHandler upgrades a new HTTP request to a WebSocket and manages its lifecycle.
+// --- CHANGED: This handler now assumes authentication has already passed ---
 func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Request) {
+	// The auth middleware has already run and validated the token.
 	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// This is a failsafe, but should be caught by middleware.
+		http.Error(w, "Unauthorized: Auth middleware failed to set user context.", http.StatusUnauthorized)
 		return
 	}
-	userURN, err := urn.New(urn.SecureMessaging, urn.EntityTypeUser, authedUserID)
+	userURN, err := urn.Parse(authedUserID)
 	if err != nil {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error: Could not parse user URN", http.StatusInternalServerError)
 		return
 	}
 
-	conn, err := cm.upgrader.Upgrade(w, r, nil)
+	// --- THIS IS THE HANDSHAKE FIX ---
+	// We must read the protocol header (which contains the token)
+	// and pass it back to the upgrader to complete the handshake.
+	protocol := r.Header.Get("Sec-WebSocket-Protocol")
+	headers := http.Header{}
+	if protocol != "" {
+		headers.Set("Sec-WebSocket-Protocol", protocol)
+	}
+
+	conn, err := cm.upgrader.Upgrade(w, r, headers) // <-- Pass headers to complete handshake
 	if err != nil {
 		cm.logger.Error().Err(err).Msg("Failed to upgrade connection.")
 		return
 	}
+	// --- END FIX ---
+
 	defer func() {
 		err = conn.Close()
 		if err != nil {
