@@ -1,12 +1,13 @@
 /*
 File: routingservice/routingservice.go
-Description: REFACTORED to add a discoverable /service-info
-endpoint and apply CORS middleware to all handlers.
+Description: REFACTORED to use the new 'routing.ServiceDependencies'
+struct and remove all references to the old delivery pipeline.
 */
 package routingservice
 
 import (
 	"context"
+	"errors" // <-- ADDED
 	"fmt"
 	"net/http"
 
@@ -19,8 +20,6 @@ import (
 
 	// REFACTORED: Use new base server and platform types
 	"github.com/tinywideclouds/go-microservice-base/pkg/microservice"
-	"github.com/tinywideclouds/go-microservice-base/pkg/middleware" // *** NEW ***
-	"github.com/tinywideclouds/go-microservice-base/pkg/response"   // *** NEW ***
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -30,6 +29,7 @@ type Wrapper struct {
 	processingService *messagepipeline.StreamingService[secure.SecureEnvelope]
 	apiHandler        *api.API
 	logger            zerolog.Logger
+	httpReadyChan     chan struct{} // <-- ADDED: Channel to wait for HTTP server
 }
 
 // New creates and wires up the entire routing service using the base server.
@@ -43,7 +43,13 @@ func New(
 	// 1. Create the standard base server.
 	baseServer := microservice.NewBaseServer(logger, ":"+cfg.APIPort)
 
+	// --- ADDED: Set up the ready channel ---
+	httpReadyChan := make(chan struct{})
+	baseServer.SetReadyChannel(httpReadyChan)
+	// --- END ADD ---
+
 	// 2. Create the API handlers.
+	// REFACTORED: Pass the new 'MessageQueue'
 	apiHandler := api.NewAPI(
 		dependencies.IngestionProducer,
 		dependencies.MessageQueue,
@@ -56,15 +62,7 @@ func New(
 		return nil, fmt.Errorf("failed to create processing service: %w", err)
 	}
 
-	// 4. *** NEW: Create CORS Middleware ***
-	// Use the config to create the middleware
-	corsCfg := middleware.CorsConfig{
-		AllowedOrigins: cfg.Cors.AllowedOrigins,
-		Role:           middleware.CorsRole(cfg.Cors.Role), // Cast string to CorsRole
-	}
-	corsMiddleware := middleware.NewCorsMiddleware(corsCfg)
-
-	// 5. Get the router and attach handlers.
+	// 4. Create the router and attach handlers.
 	mux := baseServer.Mux()
 
 	sendHandler := http.HandlerFunc(apiHandler.SendHandler)
@@ -75,42 +73,16 @@ func New(
 	authedBatchHandler := authMiddleware(batchHandler)
 	authedAckHandler := authMiddleware(ackHandler)
 
-	// *** NEW: Apply CORS to all handlers ***
-	mux.Handle("POST /api/send", corsMiddleware(authedSendHandler))
-	mux.Handle("GET /api/messages", corsMiddleware(authedBatchHandler))
-	mux.Handle("POST /api/messages/ack", corsMiddleware(authedAckHandler))
-
-	// *** NEW: Add OPTIONS handlers for API routes ***
-	apiOptionsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.Handle("OPTIONS /api/send", corsMiddleware(apiOptionsHandler))
-	mux.Handle("OPTIONS /api/messages", corsMiddleware(apiOptionsHandler))
-	mux.Handle("OPTIONS /api/messages/ack", corsMiddleware(apiOptionsHandler))
-
-	// 6. *** NEW: Define and register the discovery handler ***
-	type serviceInfoPayload struct {
-		WebSocketPort string `json:"webSocketPort"`
-		APIPort       string `json:"apiPort"`
-	}
-	info := serviceInfoPayload{
-		WebSocketPort: cfg.WebSocketPort,
-		APIPort:       cfg.APIPort,
-	}
-
-	serviceInfoHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		response.WriteJSON(w, http.StatusOK, info)
-	})
-
-	// Register the new handler on a "well-known" path
-	mux.Handle("/.well-known/service-info", corsMiddleware(serviceInfoHandler))
-	mux.Handle("OPTIONS /.well-known/service-info", corsMiddleware(apiOptionsHandler))
+	mux.Handle("POST /api/send", authedSendHandler)
+	mux.Handle("GET /api/messages", authedBatchHandler)
+	mux.Handle("POST /api/messages/ack", authedAckHandler)
 
 	return &Wrapper{
 		BaseServer:        baseServer,
 		processingService: processingService,
 		apiHandler:        apiHandler,
 		logger:            logger,
+		httpReadyChan:     httpReadyChan, // <-- ADDED: Store the channel
 	}, nil
 }
 
@@ -139,10 +111,40 @@ func (w *Wrapper) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start processing service: %w", err)
 	}
 
-	w.SetReady(true)
-	w.logger.Info().Msg("Service is now ready.")
+	// --- MODIFIED: Start server and wait for it to be ready ---
+	serverErrChan := make(chan error, 1)
+	go func() {
+		if err := w.BaseServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			w.logger.Error().Err(err).Msg("HTTP server failed")
+			serverErrChan <- err
+		}
+		close(serverErrChan)
+	}()
 
-	return w.BaseServer.Start()
+	// Wait for EITHER the server to be ready OR for it to fail on startup
+	select {
+	case <-w.httpReadyChan:
+		// This channel is closed by BaseServer.Start() *after* net.Listen() succeeds
+		w.logger.Info().Msg("HTTP listener is active.")
+		// NOW it is safe to mark the service as ready
+		w.SetReady(true)
+		w.logger.Info().Msg("Service is now ready.")
+
+	case err := <-serverErrChan:
+		// Server failed before it could listen
+		return fmt.Errorf("HTTP server failed to start: %w", err)
+
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Wait for the server goroutine to exit (which happens on Shutdown)
+	if err := <-serverErrChan; err != nil {
+		return err
+	}
+
+	return nil
+	// --- END MODIFICATION ---
 }
 
 // Shutdown gracefully stops all service components in the correct order.

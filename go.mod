@@ -10,10 +10,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/illmade-knight/go-dataflow v0.3.7
-	github.com/illmade-knight/go-microservice-base v0.0.7
-	github.com/illmade-knight/go-secure-messaging v0.0.20
 	github.com/illmade-knight/go-test v0.0.6
 	github.com/lestrrat-go/jwx/v2 v2.1.6
+	github.com/redis/go-redis/v9 v9.14.0
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tinywideclouds/gen-platform v0.0.2
@@ -107,14 +106,12 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
-	github.com/redis/go-redis/v9 v9.14.0 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.25.5 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.5.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/testcontainers/testcontainers-go v0.38.0 // indirect
-	github.com/tinywideclouds/go-action-intention-protos v0.0.0-20251029162430-fd543f6b267d // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

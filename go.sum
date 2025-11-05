@@ -170,10 +170,6 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 h1:8Tjv8EJ+pM1xP8mK6egEbD1OgnV
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2/go.mod h1:pkJQ2tZHJ0aFOVEEot6oZmaVEZcRme73eIFmhiVuRWs=
 github.com/illmade-knight/go-dataflow v0.3.7 h1:AjrBE/GQqUONszpAenek341mgZBo5NnjiInXsn72m2o=
 github.com/illmade-knight/go-dataflow v0.3.7/go.mod h1:Xny5Becp2T4vREamNbKJOGnPUJ7/E2BEWSBz1UMDEuk=
-github.com/illmade-knight/go-microservice-base v0.0.7 h1:D5BLT7C5TLKGi0oCG0Ti7YhcU5sOwJHhR+3t0IyBSwQ=
-github.com/illmade-knight/go-microservice-base v0.0.7/go.mod h1:F+1Y+rh7/7dxHDTY5XXYN7YwCeBz+MKL5iYUkAb6QMk=
-github.com/illmade-knight/go-secure-messaging v0.0.20 h1:nbHz9BR0mRJqIcozhptoIVrEvIj2Jfefz4eP46obSFM=
-github.com/illmade-knight/go-secure-messaging v0.0.20/go.mod h1:7MWQEVKlfStT18M788uGHvO47I0DLa0Y6O5zkkc3+ow=
 github.com/illmade-knight/go-test v0.0.6 h1:a1snqy0GIEfnlrKg9u4X9gmMN7rNIgWRuDI+V5nlHes=
 github.com/illmade-knight/go-test v0.0.6/go.mod h1:lxtdPQYpGXVyyUvm59/ZCcYCS4UYvbqaRne0uTbtqOs=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
@@ -284,8 +280,6 @@ github.com/testcontainers/testcontainers-go v0.38.0 h1:d7uEapLcv2P8AvH8ahLqDMMxd
 github.com/testcontainers/testcontainers-go v0.38.0/go.mod h1:C52c9MoHpWO+C4aqmgSU+hxlR5jlEayWtgYrb8Pzz1w=
 github.com/tinywideclouds/gen-platform v0.0.2 h1:fvwPzy4FM5Gc+FxrGOoFDyYC2vFGT+AEX1UovTid7dY=
 github.com/tinywideclouds/gen-platform v0.0.2/go.mod h1:COG3BwD4rMgdquKXsTui0nNaI9w/b4hbgmBVDOjwGqg=
-github.com/tinywideclouds/go-action-intention-protos v0.0.0-20251029162430-fd543f6b267d h1:OLb1hd/cLExRazJiCWoCUwEeJuWj72T31vNl13wXQcs=
-github.com/tinywideclouds/go-action-intention-protos v0.0.0-20251029162430-fd543f6b267d/go.mod h1:g5Kf3al4jIx0aPONFAqKkDIxZX/4cF3KlvPic/1FSzU=
 github.com/tinywideclouds/go-microservice-base v0.0.1 h1:IaoRxjg/anhbrV3NG0T3v1iBWAZRlqNtavup8HWYUf8=
 github.com/tinywideclouds/go-microservice-base v0.0.1/go.mod h1:wmPQFHoVzwbdZxIklNk3wXz2/CGUjdvTmOqAAzSXm1g=
 github.com/tinywideclouds/go-platform v0.0.5 h1:vRexOezAv9JjDDBD+mP5LfQi7bIts5BG6jg3qlViaM0=
