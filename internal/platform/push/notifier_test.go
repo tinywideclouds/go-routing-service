@@ -8,10 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,7 @@ func (m *mockEventProducer) Publish(ctx context.Context, data messagepipeline.Me
 // TestNotify tests the PubSubNotifier's core logic
 func TestNotify(t *testing.T) {
 	ctx := context.Background()
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	testURN, _ := urn.Parse("urn:sm:user:test-user")
 
 	// The envelope is now only used to satisfy the interface,

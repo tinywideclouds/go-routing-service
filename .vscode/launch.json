@@ -10,7 +10,8 @@
             "env": {
                 "IDENTITY_SERVICE_URL": "http://localhost:3000",
                 "GCP_PROJECT_ID": "gemini-power-test",
-                "JWT_SECRET": "a-secure-e2e-test-secret-that-is-not-the-default-really"
+                "JWT_SECRET": "a-secure-e2e-test-secret-that-is-not-the-default-really",
+                "LOG_LEVEL": "debug"
             },
         }
     ]

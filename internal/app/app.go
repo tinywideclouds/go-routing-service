@@ -4,13 +4,14 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog" // IMPORTED
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/rs/zerolog"
+	// "github.com/rs/zerolog" // REMOVED
 	"github.com/tinywideclouds/go-routing-service/internal/realtime"
 	"github.com/tinywideclouds/go-routing-service/routingservice"
 )
@@ -20,7 +21,7 @@ import (
 // graceful shutdown of both.
 func Run(
 	ctx context.Context,
-	logger zerolog.Logger,
+	logger *slog.Logger, // CHANGED
 	apiService *routingservice.Wrapper,
 	connManager *realtime.ConnectionManager,
 ) {
@@ -32,21 +33,21 @@ func Run(
 	// Start both services in separate goroutines.
 	go func() {
 		defer wg.Done()
-		logger.Info().Msg("Starting API Service...")
+		logger.Info("Starting API Service...") // CHANGED
 		err := apiService.Start(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error().Err(err).Msg("API Service failed")
-			cancel() // Trigger shutdown of other services.
+			logger.Error("API Service failed", "err", err) // CHANGED
+			cancel()                                       // Trigger shutdown of other services.
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		logger.Info().Msg("Starting Connection Manager Service...")
+		logger.Info("Starting Connection Manager Service...") // CHANGED
 		err := connManager.Start(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error().Err(err).Msg("Connection Manager Service failed")
-			cancel() // Trigger shutdown of other services.
+			logger.Error("Connection Manager Service failed", "err", err) // CHANGED
+			cancel()                                                      // Trigger shutdown of other services.
 		}
 	}()
 
@@ -55,27 +56,27 @@ func Run(
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case sig := <-shutdown:
-		logger.Info().Str("signal", sig.String()).Msg("Received shutdown signal.")
+		logger.Info("Received shutdown signal.", "signal", sig.String()) // CHANGED
 	case <-ctx.Done():
-		logger.Info().Msg("Context cancelled, initiating shutdown.")
+		logger.Info("Context cancelled, initiating shutdown.") // CHANGED
 	}
 
 	// Execute graceful shutdown.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
-	logger.Info().Msg("Shutting down API Service...")
+	logger.Info("Shutting down API Service...") // CHANGED
 	err := apiService.Shutdown(shutdownCtx)
 	if err != nil {
-		logger.Error().Err(err).Msg("API Service shutdown failed.")
+		logger.Error("API Service shutdown failed.", "err", err) // CHANGED
 	}
 
-	logger.Info().Msg("Shutting down Connection Manager...")
+	logger.Info("Shutting down Connection Manager...") // CHANGED
 	err = connManager.Shutdown(shutdownCtx)
 	if err != nil {
-		logger.Error().Err(err).Msg("Connection Manager shutdown failed.")
+		logger.Error("Connection Manager shutdown failed.", "err", err) // CHANGED
 	}
 
 	wg.Wait()
-	logger.Info().Msg("All services shut down gracefully.")
+	logger.Info("All services shut down gracefully.") // CHANGED
 }

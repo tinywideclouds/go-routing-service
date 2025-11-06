@@ -9,12 +9,13 @@ package queue_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/illmade-knight/go-test/emulators"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
@@ -71,7 +72,7 @@ func setupHotSuite(t *testing.T) *hotTestFixture {
 		_ = fsClient.Close()
 	})
 
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hotQueue, err := fsqueue.NewFirestoreHotQueue(fsClient, mainCollectionName, pendingCollectionName, logger)
 	require.NoError(t, err)
 

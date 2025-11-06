@@ -10,6 +10,9 @@ package pipeline_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +25,7 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/rs/zerolog"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -103,7 +107,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	t.Cleanup(cancel)
 	const projectID = "test-project-pipeline"
 	runID := uuid.NewString()
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 
 	// 1. Setup Emulators
 	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID))
@@ -148,10 +152,12 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	ingestSubID := "ingress-sub-" + runID
 	createPubsubResources(t, ctx, psClient, projectID, ingressTopicID, ingestSubID)
 
+	noisyZerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+
 	cfg := &config.AppConfig{NumPipelineWorkers: 1}
 	processor := pipeline.NewRoutingProcessor(deps, cfg, logger)
 	consumer, err := messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(ingestSubID), psClient, logger,
+		messagepipeline.NewGooglePubsubConsumerDefaults(ingestSubID), psClient, noisyZerologLogger,
 	)
 	require.NoError(t, err)
 
@@ -160,7 +166,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 		consumer,
 		pipeline.EnvelopeTransformer,
 		processor,
-		logger,
+		noisyZerologLogger,
 	)
 	require.NoError(t, err)
 

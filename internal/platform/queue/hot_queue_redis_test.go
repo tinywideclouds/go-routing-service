@@ -8,11 +8,12 @@ package queue_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/illmade-knight/go-test/emulators" // Import your emulator pkg
 	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
@@ -68,7 +69,7 @@ func setupRedisSuite(t *testing.T) (context.Context, *redisTestFixture) {
 	require.NoError(t, err)
 
 	// 3. Create RedisHotQueue
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hotQueue, err := fsqueue.NewRedisHotQueue(rdb, logger)
 	require.NoError(t, err)
 

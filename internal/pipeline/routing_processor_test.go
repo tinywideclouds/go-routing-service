@@ -8,10 +8,10 @@ package pipeline_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -111,7 +111,7 @@ func (m *mockPushNotifier) Notify(ctx context.Context, tokens []routing.DeviceTo
 
 // --- Test Setup ---
 var (
-	nopLogger    = zerolog.Nop()
+	nopLogger    = slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	testConfig   = &config.AppConfig{} // No longer needed for TopicID
 	testURN, _   = urn.Parse("urn:sm:user:test-user")
 	testEnvelope = &secure.SecureEnvelope{

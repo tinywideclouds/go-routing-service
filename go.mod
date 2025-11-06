@@ -7,6 +7,7 @@ toolchain go1.24.6
 require (
 	cloud.google.com/go/firestore v1.20.0
 	cloud.google.com/go/pubsub/v2 v2.3.0
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/illmade-knight/go-dataflow v0.3.7
@@ -16,7 +17,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tinywideclouds/gen-platform v0.0.2
-	github.com/tinywideclouds/go-microservice-base v0.0.2
+	github.com/tinywideclouds/go-microservice-base v0.0.4
 	github.com/tinywideclouds/go-platform v0.0.5
 	google.golang.org/api v0.254.0
 	google.golang.org/grpc v1.76.0
@@ -69,7 +70,6 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/goccy/go-json v0.10.3 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/google/flatbuffers v23.5.26+incompatible // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect

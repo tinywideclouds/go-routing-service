@@ -1,5 +1,9 @@
 package config
 
+import (
+	"log/slog" // IMPORTED
+)
+
 // --- YAML-Specific Structs ---
 
 type YamlRedisConfig struct {
@@ -50,7 +54,9 @@ type YamlConfig struct {
 
 // NewConfigFromYaml converts the raw unmarshaled data (YamlConfig) into a clean, base AppConfig struct.
 // Stage 1 complete: The AppConfig struct now exists, but without environment overrides.
-func NewConfigFromYaml(yamlCfg *YamlConfig) (*AppConfig, error) {
+func NewConfigFromYaml(yamlCfg *YamlConfig, logger *slog.Logger) (*AppConfig, error) { // CHANGED
+	logger.Debug("Mapping YAML config to base config struct") // ADDED
+
 	// This mapping is 1:1, as AppConfig matches YamlConfig
 	appCfg := &AppConfig{
 		ProjectID:                yamlCfg.ProjectID,
@@ -68,6 +74,16 @@ func NewConfigFromYaml(yamlCfg *YamlConfig) (*AppConfig, error) {
 		PushNotificationsTopicID: yamlCfg.PushNotificationsTopicID,
 		NumPipelineWorkers:       yamlCfg.NumPipelineWorkers,
 	}
+
+	// ADDED: Log key values for traceability
+	logger.Debug("YAML config mapping complete",
+		"project_id", appCfg.ProjectID,
+		"api_port", appCfg.APIPort,
+		"websocket_port", appCfg.WebSocketPort,
+		"identity_service_url", appCfg.IdentityServiceURL,
+		"hot_queue_type", appCfg.HotQueue.Type,
+		"presence_cache_type", appCfg.PresenceCache.Type,
+	)
 
 	return appCfg, nil
 }

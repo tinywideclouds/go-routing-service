@@ -15,6 +15,7 @@ import (
 // newBaseConfig creates a mock "Stage 1" config,
 // simulating what NewConfigFromYaml would produce.
 func newBaseConfig() *config.AppConfig {
+
 	return &config.AppConfig{
 		ProjectID:          "base-project",
 		RunMode:            "base-mode",
@@ -32,7 +33,7 @@ func newBaseConfig() *config.AppConfig {
 }
 
 func TestUpdateConfigWithEnvOverrides(t *testing.T) {
-
+	logger := newTestLogger() // ADDED
 	t.Run("Success - All overrides applied", func(t *testing.T) {
 		// Arrange
 		baseCfg := newBaseConfig()
@@ -46,7 +47,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 
 		// Act
 		// This is the "Stage 2" function
-		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg)
+		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger) // CHANGED
 
 		// Assert
 		require.NoError(t, err)
@@ -78,7 +79,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		// Note: REDIS_ADDR is not strictly required by validation
 
 		// Act
-		cfg, err := config.UpdateConfigWithEnvOverrides(emptyCfg)
+		cfg, err := config.UpdateConfigWithEnvOverrides(emptyCfg, logger) // CHANGED
 
 		// Assert
 		require.NoError(t, err)
@@ -96,7 +97,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		os.Unsetenv("GCP_PROJECT_ID")
 
 		// Act
-		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg)
+		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
 		// Assert
 		assert.Error(t, err)
@@ -111,7 +112,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		os.Unsetenv("IDENTITY_SERVICE_URL")
 
 		// Act
-		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg)
+		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
 		// Assert
 		assert.Error(t, err)
@@ -126,7 +127,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		os.Unsetenv("API_PORT")
 
 		// Act
-		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg)
+		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
 		// Assert
 		assert.Error(t, err)
@@ -142,7 +143,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Act
-		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg)
+		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
 		// Assert
 		assert.Error(t, err)

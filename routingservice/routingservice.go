@@ -9,10 +9,12 @@ import (
 	"context"
 	"errors" // <-- ADDED
 	"fmt"
+	"log/slog" // IMPORTED
 	"net/http"
+	"os"
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/rs/zerolog"
+	"github.com/rs/zerolog" // needed for noisy logger in pipeline
 	"github.com/tinywideclouds/go-routing-service/internal/api"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
@@ -28,7 +30,7 @@ type Wrapper struct {
 	*microservice.BaseServer
 	processingService *messagepipeline.StreamingService[secure.SecureEnvelope]
 	apiHandler        *api.API
-	logger            zerolog.Logger
+	logger            *slog.Logger  // CHANGED
 	httpReadyChan     chan struct{} // <-- ADDED: Channel to wait for HTTP server
 }
 
@@ -37,11 +39,11 @@ func New(
 	cfg *config.AppConfig,
 	dependencies *routing.ServiceDependencies, // REFACTORED: Use new struct
 	authMiddleware func(http.Handler) http.Handler,
-	logger zerolog.Logger,
+	logger *slog.Logger, // CHANGED
 ) (*Wrapper, error) {
 
 	// 1. Create the standard base server.
-	baseServer := microservice.NewBaseServer(logger, ":"+cfg.APIPort)
+	baseServer := microservice.NewBaseServer(logger, ":"+cfg.APIPort) // CHANGED
 
 	// --- ADDED: Set up the ready channel ---
 	httpReadyChan := make(chan struct{})
@@ -53,12 +55,13 @@ func New(
 	apiHandler := api.NewAPI(
 		dependencies.IngestionProducer,
 		dependencies.MessageQueue,
-		logger.With().Str("component", "API").Logger(),
+		logger.With("component", "API"), // CHANGED
 	)
 
 	// 3. Create the main background processing pipeline.
 	processingService, err := newProcessingService(cfg, dependencies, logger)
 	if err != nil {
+		logger.Error("Failed to create processing service", "err", err) // ADDED
 		return nil, fmt.Errorf("failed to create processing service: %w", err)
 	}
 
@@ -77,6 +80,8 @@ func New(
 	mux.Handle("GET /api/messages", authedBatchHandler)
 	mux.Handle("POST /api/messages/ack", authedAckHandler)
 
+	logger.Debug("API routes registered") // ADDED
+
 	return &Wrapper{
 		BaseServer:        baseServer,
 		processingService: processingService,
@@ -90,32 +95,38 @@ func New(
 func newProcessingService(
 	cfg *config.AppConfig,
 	dependencies *routing.ServiceDependencies, // REFACTORED: Use new struct
-	logger zerolog.Logger,
+	logger *slog.Logger, // CHANGED
 ) (*messagepipeline.StreamingService[secure.SecureEnvelope], error) {
 
-	processor := pipeline.NewRoutingProcessor(dependencies, cfg, logger)
+	processorLogger := logger.With("component", "RoutingProcessor") // ADDED
+	processor := pipeline.NewRoutingProcessor(dependencies, cfg, processorLogger)
 
+	// streamLogger := logger.With("component", "StreamingService") // ADDED
+	noisyZerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	return messagepipeline.NewStreamingService[secure.SecureEnvelope](
 		messagepipeline.StreamingServiceConfig{NumWorkers: cfg.NumPipelineWorkers},
 		dependencies.IngestionConsumer,
 		pipeline.EnvelopeTransformer,
 		processor,
-		logger,
+		noisyZerologLogger, // CHANGED (This assumes NewStreamingService accepts a slog.Logger)
 	)
 }
 
 // Start runs the service's background components before starting the base HTTP server.
 func (w *Wrapper) Start(ctx context.Context) error {
-	w.logger.Info().Msg("Core processing pipeline starting...")
+	w.logger.Info("Core processing pipeline starting...")
 	if err := w.processingService.Start(ctx); err != nil {
+		w.logger.Error("Failed to start processing service", "err", err) // ADDED
 		return fmt.Errorf("failed to start processing service: %w", err)
 	}
+	w.logger.Info("Core processing pipeline started.") // ADDED
 
 	// --- MODIFIED: Start server and wait for it to be ready ---
 	serverErrChan := make(chan error, 1)
 	go func() {
+		// BaseServer.Start() is already refactored to use slog
 		if err := w.BaseServer.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			w.logger.Error().Err(err).Msg("HTTP server failed")
+			// This error is logged inside BaseServer, no need to log here.
 			serverErrChan <- err
 		}
 		close(serverErrChan)
@@ -125,45 +136,52 @@ func (w *Wrapper) Start(ctx context.Context) error {
 	select {
 	case <-w.httpReadyChan:
 		// This channel is closed by BaseServer.Start() *after* net.Listen() succeeds
-		w.logger.Info().Msg("HTTP listener is active.")
+		w.logger.Info("HTTP listener is active.") // CHANGED
 		// NOW it is safe to mark the service as ready
-		w.SetReady(true)
-		w.logger.Info().Msg("Service is now ready.")
+		w.SetReady(true)                       // SetReady() is already refactored to use slog
+		w.logger.Info("Service is now ready.") // CHANGED
 
 	case err := <-serverErrChan:
 		// Server failed before it could listen
+		w.logger.Error("HTTP server failed to start", "err", err) // ADDED
 		return fmt.Errorf("HTTP server failed to start: %w", err)
 
 	case <-ctx.Done():
+		w.logger.Info("Service start cancelled by context") // ADDED
 		return ctx.Err()
 	}
 
 	// Wait for the server goroutine to exit (which happens on Shutdown)
 	if err := <-serverErrChan; err != nil {
+		w.logger.Error("HTTP server shut down with an error", "err", err) // ADDED
 		return err
 	}
 
+	w.logger.Info("HTTP server shut down cleanly.") // ADDED
 	return nil
 	// --- END MODIFICATION ---
 }
 
 // Shutdown gracefully stops all service components in the correct order.
 func (w *Wrapper) Shutdown(ctx context.Context) error {
-	w.logger.Info().Msg("Shutting down service components...")
+	w.logger.Info("Shutting down service components...") // CHANGED
 	var finalErr error
 
 	if err := w.processingService.Stop(ctx); err != nil {
-		w.logger.Error().Err(err).Msg("Processing service shutdown failed.")
+		w.logger.Error("Processing service shutdown failed.", "err", err) // CHANGED
 		finalErr = err
 	}
 
-	w.apiHandler.Wait() // Wait for any background API tasks (e.g., message deletion) to finish.
+	w.logger.Debug("Waiting for API handler background tasks...") // ADDED
+	w.apiHandler.Wait()                                           // Wait for any background API tasks (e.g., message deletion) to finish.
+	w.logger.Debug("API handler tasks finished.")                 // ADDED
 
+	// BaseServer.Shutdown() is already refactored to use slog
 	if err := w.BaseServer.Shutdown(ctx); err != nil {
-		w.logger.Error().Err(err).Msg("HTTP server shutdown failed.")
+		// This error is logged inside BaseServer, no need to log here.
 		finalErr = err
 	}
 
-	w.logger.Info().Msg("All components shut down.")
+	w.logger.Info("All components shut down.") // CHANGED
 	return finalErr
 }

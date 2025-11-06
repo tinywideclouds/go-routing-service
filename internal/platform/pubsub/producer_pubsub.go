@@ -9,6 +9,7 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"log/slog" // IMPORTED
 
 	"cloud.google.com/go/pubsub/v2"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -21,6 +22,7 @@ import (
 // This allows us to use a mock for testing.
 type pubsubTopicClient interface {
 	Publish(ctx context.Context, msg *pubsub.Message) *pubsub.PublishResult
+	String() string // ADDED: For logging the topic name
 }
 
 // Producer implements the routing.IngestionProducer interface.
@@ -50,6 +52,8 @@ func (p *Producer) Publish(ctx context.Context, envelope *secure.SecureEnvelope)
 	// the unmarshaler used by the EnvelopeTransformer.
 	payloadBytes, err := protojson.Marshal(protoEnvelope)
 	if err != nil {
+		// ADDED: Log marshaling error
+		slog.ErrorContext(ctx, "Failed to marshal envelope for publishing", "err", err, "recipient", envelope.RecipientID.String())
 		return fmt.Errorf("failed to marshal envelope for publishing: %w", err)
 	}
 
@@ -58,12 +62,18 @@ func (p *Producer) Publish(ctx context.Context, envelope *secure.SecureEnvelope)
 		Data: payloadBytes,
 	}
 
+	slog.DebugContext(ctx, "Publishing message to Pub/Sub", "topic", p.topic.String(), "recipient", envelope.RecipientID.String()) // ADDED
+
 	// Publish the message and wait for the result.
 	result := p.topic.Publish(ctx, message)
-	_, err = result.Get(ctx)
+	msgID, err := result.Get(ctx)
 	if err != nil {
+		// ADDED: Log publish error
+		slog.ErrorContext(ctx, "Failed to publish message", "err", err, "topic", p.topic.String(), "recipient", envelope.RecipientID.String())
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
+
+	slog.DebugContext(ctx, "Message published successfully", "topic", p.topic.String(), "msg_id", msgID) // ADDED
 
 	return nil
 }

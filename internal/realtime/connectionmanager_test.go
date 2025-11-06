@@ -12,6 +12,8 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +24,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -130,7 +131,7 @@ type testFixture struct {
 // setup creates a test fixture for the ConnectionManager.
 func setup(t *testing.T) *testFixture {
 	t.Helper()
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 
 	// 1. Create Mocks
 	presenceCache := new(mockPresenceCache)
@@ -143,7 +144,7 @@ func setup(t *testing.T) *testFixture {
 	t.Cleanup(mockJWKSServer.Close)
 
 	// Create the *real* WebSocket auth middleware
-	authMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(mockJWKSServer.URL)
+	authMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(mockJWKSServer.URL, logger)
 	require.NoError(t, err)
 
 	// Create a valid token

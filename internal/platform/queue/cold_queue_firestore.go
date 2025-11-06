@@ -8,11 +8,12 @@ package queue
 import (
 	"context"
 	"fmt"
+	"log/slog" // IMPORTED
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
+	// "github.com/rs/zerolog" // REMOVED
 	"github.com/tinywideclouds/go-routing-service/internal/queue" // Import new interfaces
 
 	// Platform packages
@@ -30,12 +31,12 @@ type storedMessage struct {
 // FirestoreColdQueue implements the queue.ColdQueue interface using Google Cloud Firestore.
 type FirestoreColdQueue struct {
 	client         *firestore.Client
-	logger         zerolog.Logger
-	collectionName string // Configured collection name
+	logger         *slog.Logger // CHANGED
+	collectionName string       // Configured collection name
 }
 
 // NewFirestoreColdQueue is the constructor for the FirestoreColdQueue.
-func NewFirestoreColdQueue(client *firestore.Client, collectionName string, logger zerolog.Logger) (queue.ColdQueue, error) {
+func NewFirestoreColdQueue(client *firestore.Client, collectionName string, logger *slog.Logger) (queue.ColdQueue, error) { // CHANGED
 	if client == nil {
 		return nil, fmt.Errorf("firestore client cannot be nil")
 	}
@@ -44,7 +45,7 @@ func NewFirestoreColdQueue(client *firestore.Client, collectionName string, logg
 	}
 	return &FirestoreColdQueue{
 		client:         client,
-		logger:         logger,
+		logger:         logger.With("component", "firestore_cold_queue", "collection", collectionName), // CHANGED
 		collectionName: collectionName,
 	}, nil
 }
@@ -57,10 +58,11 @@ func (s *FirestoreColdQueue) messagesCollection(urn urn.URN) *firestore.Collecti
 // Enqueue saves a single message envelope for a specific recipient URN in Firestore.
 func (s *FirestoreColdQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
 	collectionRef := s.messagesCollection(envelope.RecipientID)
+	log := s.logger.With("user", envelope.RecipientID.String()) // ADDED
 
 	pb := secure.ToProto(envelope)
 	if pb == nil {
-		s.logger.Warn().Msg("Skipping nil envelope")
+		log.Warn("Skipping nil envelope") // CHANGED
 		return nil
 	}
 
@@ -71,35 +73,45 @@ func (s *FirestoreColdQueue) Enqueue(ctx context.Context, envelope *secure.Secur
 
 	docRef := collectionRef.Doc(uuid.NewString())
 	_, err := docRef.Create(ctx, storedMsg)
-	return err
+	if err != nil { // ADDED ERROR LOGGING
+		log.Error("Failed to enqueue message to cold queue", "err", err)
+		return err
+	}
+	log.Debug("Enqueued message to cold queue", "doc_id", docRef.ID) // ADDED
+	return nil
 }
 
 // RetrieveMessageBatch fetches the next available batch of queued messages.
 func (s *FirestoreColdQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
 	collectionRef := s.messagesCollection(userURN)
+	log := s.logger.With("user", userURN.String()) // ADDED
 
 	query := collectionRef.OrderBy("queued_at", firestore.Asc).Limit(limit)
 
+	log.Debug("Retrieving cold message batch", "limit", limit) // ADDED
 	docSnaps, err := query.Documents(ctx).GetAll()
 	if err != nil {
+		log.Error("Failed to retrieve cold message batch", "err", err) // ADDED
 		return nil, fmt.Errorf("failed to retrieve message batch: %w", err)
 	}
 
 	if len(docSnaps) == 0 {
+		log.Debug("No cold messages found for user") // ADDED
 		return []*routing.QueuedMessage{}, nil
 	}
 
+	log.Debug("Retrieved cold message batch", "count", len(docSnaps)) // ADDED
 	queuedMessages := make([]*routing.QueuedMessage, 0, len(docSnaps))
 	for _, doc := range docSnaps {
 		var storedMsg storedMessage
 		if err := doc.DataTo(&storedMsg); err != nil {
-			s.logger.Error().Err(err).Str("doc_id", doc.Ref.ID).Msg("Failed to unmarshal stored message, skipping")
+			log.Error("Failed to unmarshal stored cold message, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
 			continue
 		}
 
 		nativeEnv, err := secure.FromProto(storedMsg.Envelope)
 		if err != nil {
-			s.logger.Error().Err(err).Str("doc_id", doc.Ref.ID).Msg("Failed to convert protobuf to native envelope, skipping")
+			log.Error("Failed to convert protobuf to native envelope, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
 			continue
 		}
 
@@ -118,30 +130,31 @@ func (s *FirestoreColdQueue) Acknowledge(ctx context.Context, userURN urn.URN, m
 		return nil
 	}
 
-	log := s.logger.With().Str("user", userURN.String()).Logger()
+	log := s.logger.With("user", userURN.String()) // CHANGED
 	collectionRef := s.messagesCollection(userURN)
 
 	bulkWriter := s.client.BulkWriter(ctx)
 	var firstErr error
 
-	log.Debug().Int("count", len(messageIDs)).Msg("Enqueuing messages for deletion.")
+	log.Debug("Enqueuing cold messages for deletion", "count", len(messageIDs)) // CHANGED
 
 	for _, msgID := range messageIDs {
 		docRef := collectionRef.Doc(msgID)
 		if _, err := bulkWriter.Delete(docRef); err != nil {
-			log.Error().Err(err).Str("doc_id", msgID).Msg("Failed to enqueue document for deletion")
+			log.Error("Failed to enqueue cold document for deletion", "err", err, "doc_id", msgID) // CHANGED
 			if firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
 
-	bulkWriter.End()
+	bulkWriter.End() // Flushes any remaining writes
 
 	if firstErr != nil {
+		log.Error("Failed to enqueue one or more cold messages for deletion", "err", firstErr) // ADDED
 		return fmt.Errorf("failed to enqueue one or more messages for deletion: %w", firstErr)
 	}
 
-	log.Info().Int("count", len(messageIDs)).Msg("Successfully acknowledged (deleted) messages.")
+	log.Info("Successfully acknowledged (deleted) cold messages", "count", len(messageIDs)) // CHANGED
 	return nil
 }

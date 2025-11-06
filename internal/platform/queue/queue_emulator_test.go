@@ -10,13 +10,14 @@ package queue_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/illmade-knight/go-test/emulators"
 	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
@@ -70,7 +71,7 @@ func setupEmulatorSuite(t *testing.T) *emulatorTestFixture {
 	t.Cleanup(func() { _ = fsClient.Close() })
 
 	// 3. Create Queues
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hotQueue, err := fsqueue.NewRedisHotQueue(rdb, logger)
 	require.NoError(t, err)
 

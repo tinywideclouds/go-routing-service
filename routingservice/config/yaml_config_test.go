@@ -2,6 +2,8 @@
 package config_test
 
 import (
+	"io"       // IMPORTED
+	"log/slog" // IMPORTED
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,7 +13,14 @@ import (
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 )
 
+// newTestLogger creates a discard logger for tests.
+func newTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestNewConfigFromYaml(t *testing.T) {
+
+	logger := newTestLogger() // ADDED
 	t.Run("Success - maps all fields correctly from YAML struct", func(t *testing.T) {
 		// Arrange
 		// This simulates the raw struct after unmarshaling the YAML file
@@ -47,7 +56,7 @@ func TestNewConfigFromYaml(t *testing.T) {
 
 		// Act
 		// This is the "Stage 1" function
-		cfg, err := config.NewConfigFromYaml(yamlCfg)
+		cfg, err := config.NewConfigFromYaml(yamlCfg, logger) // CHANGED
 
 		// Assert
 		require.NoError(t, err)

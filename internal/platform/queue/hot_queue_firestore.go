@@ -8,11 +8,12 @@ package queue
 import (
 	"context"
 	"fmt"
+	"log/slog" // IMPORTED
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
+	// "github.com/rs/zerolog" // REMOVED
 	"github.com/tinywideclouds/go-routing-service/internal/queue" // Import new interfaces
 
 	// Platform packages
@@ -31,13 +32,13 @@ type storedHotMessage struct {
 // FirestoreHotQueue implements the queue.HotQueue interface using Google Cloud Firestore.
 type FirestoreHotQueue struct {
 	client                *firestore.Client
-	logger                zerolog.Logger
-	mainCollectionName    string // e.g., "user-hot-messages"
-	pendingCollectionName string // e.g., "user-hot-pending"
+	logger                *slog.Logger // CHANGED
+	mainCollectionName    string       // e.g., "user-hot-messages"
+	pendingCollectionName string       // e.g., "user-hot-pending"
 }
 
 // NewFirestoreHotQueue is the constructor for the FirestoreHotQueue.
-func NewFirestoreHotQueue(client *firestore.Client, mainCollection, pendingCollection string, logger zerolog.Logger) (queue.HotQueue, error) {
+func NewFirestoreHotQueue(client *firestore.Client, mainCollection, pendingCollection string, logger *slog.Logger) (queue.HotQueue, error) { // CHANGED
 	if client == nil {
 		return nil, fmt.Errorf("firestore client cannot be nil")
 	}
@@ -49,7 +50,7 @@ func NewFirestoreHotQueue(client *firestore.Client, mainCollection, pendingColle
 	}
 	return &FirestoreHotQueue{
 		client:                client,
-		logger:                logger,
+		logger:                logger.With("component", "firestore_hot_queue"), // CHANGED
 		mainCollectionName:    mainCollection,
 		pendingCollectionName: pendingCollection,
 	}, nil
@@ -68,10 +69,11 @@ func (s *FirestoreHotQueue) pendingCollection(urn urn.URN) *firestore.Collection
 // Enqueue saves a single message envelope to the main hot queue.
 func (s *FirestoreHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
 	collectionRef := s.mainCollection(envelope.RecipientID)
+	log := s.logger.With("user", envelope.RecipientID.String()) // ADDED
 
 	pb := secure.ToProto(envelope)
 	if pb == nil {
-		s.logger.Warn().Msg("Skipping nil envelope")
+		log.Warn("Skipping nil envelope") // CHANGED
 		return nil
 	}
 
@@ -82,6 +84,11 @@ func (s *FirestoreHotQueue) Enqueue(ctx context.Context, envelope *secure.Secure
 
 	docRef := collectionRef.Doc(uuid.NewString())
 	_, err := docRef.Create(ctx, storedMsg)
+	if err != nil { // ADDED ERROR LOGGING
+		log.Error("Failed to enqueue message to hot queue", "err", err)
+		return err
+	}
+	log.Debug("Enqueued message to hot queue", "doc_id", docRef.ID) // ADDED
 	return err
 }
 
@@ -92,18 +99,21 @@ func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, 
 	mainCollectionRef := s.mainCollection(userURN)
 	pendingCollectionRef := s.pendingCollection(userURN)
 	queuedMessages := make([]*routing.QueuedMessage, 0, limit)
+	log := s.logger.With("user", userURN.String()) // ADDED
 
+	log.Debug("Retrieving hot message batch", "limit", limit) // ADDED
 	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
 		// 1. Find the oldest messages in the main queue.
 		query := mainCollectionRef.OrderBy("queued_at", firestore.Asc).Limit(limit)
 
 		docSnaps, err := tx.Documents(query).GetAll()
 		if err != nil {
-			return err
+			return err // Transaction will retry
 		}
 
 		if len(docSnaps) == 0 {
-			return nil // No messages to retrieve
+			log.Debug("No hot messages found for user") // ADDED
+			return nil                                  // No messages to retrieve
 		}
 
 		// 2. Move each doc from the main collection to the pending collection.
@@ -111,14 +121,14 @@ func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, 
 		for _, doc := range docSnaps {
 			var storedMsg storedHotMessage
 			if err := doc.DataTo(&storedMsg); err != nil {
-				s.logger.Error().Err(err).Str("doc_id", doc.Ref.ID).Msg("Failed to unmarshal stored hot message, skipping")
+				log.Error("Failed to unmarshal stored hot message, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
 				continue
 			}
 
 			// Convert from Protobuf back to the native Go struct
 			nativeEnv, err := secure.FromProto(storedMsg.Envelope)
 			if err != nil {
-				s.logger.Error().Err(err).Str("doc_id", doc.Ref.ID).Msg("Failed to convert protobuf to native envelope, skipping")
+				log.Error("Failed to convert protobuf to native envelope, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
 				continue
 			}
 
@@ -143,9 +153,13 @@ func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, 
 	})
 
 	if err != nil {
+		log.Error("Failed to retrieve hot message batch transaction", "err", err) // ADDED
 		return nil, fmt.Errorf("failed to retrieve hot message batch: %w", err)
 	}
 
+	if len(queuedMessages) > 0 { // ADDED
+		log.Debug("Retrieved and moved hot message batch to pending", "count", len(queuedMessages))
+	}
 	return queuedMessages, nil
 }
 
@@ -155,56 +169,63 @@ func (s *FirestoreHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, me
 		return nil
 	}
 
-	log := s.logger.With().Str("user", userURN.String()).Logger()
-	collectionRef := s.pendingCollection(userURN) // Target the PENDING collection
+	log := s.logger.With("user", userURN.String()) // CHANGED
+	collectionRef := s.pendingCollection(userURN)  // Target the PENDING collection
 
 	bulkWriter := s.client.BulkWriter(ctx)
 	var firstErr error
 
+	log.Debug("Enqueuing hot pending messages for deletion", "count", len(messageIDs)) // ADDED
+
 	for _, msgID := range messageIDs {
 		docRef := collectionRef.Doc(msgID)
 		if _, err := bulkWriter.Delete(docRef); err != nil {
-			log.Error().Err(err).Str("doc_id", msgID).Msg("Failed to enqueue hot pending doc for deletion")
+			log.Error("Failed to enqueue hot pending doc for deletion", "err", err, "doc_id", msgID) // CHANGED
 			if firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
 
-	bulkWriter.End()
+	bulkWriter.End() // Flushes remaining writes
 
 	if firstErr != nil {
+		log.Error("Failed to enqueue one or more hot pending messages for deletion", "err", firstErr) // ADDED
 		return fmt.Errorf("failed to enqueue one or more hot pending messages for deletion: %w", firstErr)
 	}
 
-	log.Info().Int("count", len(messageIDs)).Msg("Successfully acknowledged (deleted) hot pending messages.")
+	log.Info("Successfully acknowledged (deleted) hot pending messages", "count", len(messageIDs)) // CHANGED
 	return nil
 }
 
 // migrateCollection is a helper to move all docs from one collection to the cold queue
-func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef *firestore.CollectionRef, userURN urn.URN, destination queue.ColdQueue, log zerolog.Logger) (int, error) {
+func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef *firestore.CollectionRef, userURN urn.URN, destination queue.ColdQueue, log *slog.Logger) (int, error) { // CHANGED
 	var allEnvelopes []*secure.SecureEnvelope
 	var docIDsToDelete []string
 
+	log.Debug("Querying collection for migration") // ADDED
 	query := collectionRef.OrderBy("queued_at", firestore.Asc)
 	docSnaps, err := query.Documents(ctx).GetAll()
 	if err != nil {
+		log.Error("Failed to read collection for migration", "err", err) // ADDED
 		return 0, fmt.Errorf("failed to read collection for migration: %w", err)
 	}
 	if len(docSnaps) == 0 {
+		log.Debug("Collection empty, no migration needed") // ADDED
 		return 0, nil
 	}
+	log.Debug("Found messages for migration", "count", len(docSnaps)) // ADDED
 
 	// 1. Unmarshal all messages
 	for _, doc := range docSnaps {
 		var storedMsg storedHotMessage
 		if err := doc.DataTo(&storedMsg); err != nil {
-			log.Error().Err(err).Str("doc_id", doc.Ref.ID).Msg("Failed to unmarshal hot message for migration, skipping")
+			log.Error("Failed to unmarshal hot message for migration, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
 			continue
 		}
 		nativeEnv, err := secure.FromProto(storedMsg.Envelope)
 		if err != nil {
-			log.Error().Err(err).Str("doc_id", doc.Ref.ID).Msg("Failed to convert hot envelope for migration, skipping")
+			log.Error("Failed to convert hot envelope for migration, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
 			continue
 		}
 		allEnvelopes = append(allEnvelopes, nativeEnv)
@@ -212,16 +233,19 @@ func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef
 	}
 
 	// 2. Enqueue them into the cold store.
+	log.Debug("Writing messages to cold queue", "count", len(allEnvelopes)) // ADDED
 	for _, env := range allEnvelopes {
 		if err := destination.Enqueue(ctx, env); err != nil {
+			log.Error("Failed to write to cold queue during migration", "err", err) // ADDED
 			return 0, fmt.Errorf("failed to write to cold queue during migration: %w", err)
 		}
 	}
 
 	// 3. All writes to cold succeeded. Now delete from hot.
+	log.Debug("Deleting messages from hot collection", "count", len(docIDsToDelete)) // ADDED
 	if err := s.Acknowledge(ctx, userURN, docIDsToDelete); err != nil {
 		// This is non-fatal for the migration, but we must log it.
-		log.Error().Err(err).Msg("Failed to delete messages from hot collection after migration. Duplicates will exist.")
+		log.Error("Failed to delete messages from hot collection after migration. Duplicates will exist.", "err", err) // CHANGED
 	}
 
 	return len(allEnvelopes), nil
@@ -230,25 +254,31 @@ func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef
 // MigrateToCold moves all messages for a user from both the main and pending hot
 // collections to the ColdQueue.
 func (s *FirestoreHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, destination queue.ColdQueue) error {
-	log := s.logger.With().Str("user", userURN.String()).Logger()
+	log := s.logger.With("user", userURN.String()) // CHANGED
+
+	log.Debug("Starting hot-to-cold migration") // ADDED
 
 	// 1. Migrate the pending queue first (they are older)
+	log.Debug("Migrating pending collection...") // ADDED
 	pendingCount, err := s.migrateCollection(ctx, s.pendingCollection(userURN), userURN, destination, log)
 	if err != nil {
+		log.Error("Failed to migrate pending collection", "err", err) // ADDED
 		return fmt.Errorf("failed to migrate pending collection: %w", err)
 	}
 
 	// 2. Migrate the main queue
+	log.Debug("Migrating main collection...") // ADDED
 	mainCount, err := s.migrateCollection(ctx, s.mainCollection(userURN), userURN, destination, log)
 	if err != nil {
+		log.Error("Failed to migrate main collection", "err", err) // ADDED
 		return fmt.Errorf("failed to migrate main collection: %w", err)
 	}
 
 	total := pendingCount + mainCount
 	if total > 0 {
-		log.Info().Int("count", total).Msg("Successfully migrated hot queue to cold queue.")
+		log.Info("Successfully migrated hot queue to cold queue", "count", total) // CHANGED
 	} else {
-		log.Info().Msg("No hot queue messages to migrate.")
+		log.Info("No hot queue messages to migrate.") // CHANGED
 	}
 	return nil
 }

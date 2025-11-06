@@ -10,12 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -71,7 +72,7 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 
 // --- Test Setup ---
 var (
-	testLogger       = zerolog.Nop()
+	testLogger       = slog.New(slog.NewTextHandler(io.Discard, nil))
 	authedUserID     = "test-user-id-123"
 	authedUserURN, _ = urn.New(urn.SecureMessaging, urn.EntityTypeUser, authedUserID)
 	testAuthContext  = middleware.ContextWithUserID(context.Background(), authedUserID)

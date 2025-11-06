@@ -10,13 +10,14 @@ package queue_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog" // IMPORTED
 	"testing"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-test/emulators"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
@@ -32,8 +33,13 @@ type testFixture struct {
 	ctx            context.Context
 	fsClient       *firestore.Client
 	coldQueue      queue.ColdQueue
-	logger         zerolog.Logger
+	logger         *slog.Logger
 	collectionName string // Test-specific collection name
+}
+
+// newTestLogger creates a discard logger for tests.
+func newTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // setupSuite initializes the Firestore emulator and all necessary clients ONCE.
@@ -53,8 +59,8 @@ func setupSuite(t *testing.T) (context.Context, *testFixture) {
 		_ = fsClient.Close()
 	})
 
-	logger := zerolog.Nop()
-	store, err := fsqueue.NewFirestoreColdQueue(fsClient, collectionName, logger)
+	logger := newTestLogger()                                                     // CHANGED
+	store, err := fsqueue.NewFirestoreColdQueue(fsClient, collectionName, logger) // CHANGED
 	require.NoError(t, err)
 
 	return ctx, &testFixture{

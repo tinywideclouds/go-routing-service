@@ -6,7 +6,7 @@ project_id: "gemini-power-test"
 run_mode: "local"
 
 api_port: "8082"
-websocket_port: "8085"
+websocket_port: "8083"
 
 # Point this to your locally running node-identity-service
 identity_service_url: "http://localhost:3000"

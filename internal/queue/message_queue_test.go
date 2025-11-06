@@ -7,10 +7,10 @@ package queue
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -85,7 +85,7 @@ type testFixture struct {
 func setup(t *testing.T) *testFixture {
 	hot := new(mockHotQueue)
 	cold := new(mockColdQueue)
-	comp, err := NewCompositeMessageQueue(hot, cold, zerolog.Nop())
+	comp, err := NewCompositeMessageQueue(hot, cold, slog.Default())
 	require.NoError(t, err)
 
 	return &testFixture{

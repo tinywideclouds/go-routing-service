@@ -8,6 +8,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog" // IMPORTED
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -28,6 +29,8 @@ func EnvelopeTransformer(_ context.Context, msg *messagepipeline.Message) (*secu
 	if err != nil {
 		// If unmarshalling fails, we skip the message and return an error
 		// so the StreamingService can Nack it.
+		// ADDED: Log the poison message payload for debugging.
+		slog.Error("Failed to unmarshal secure envelope", "err", err, "msg_id", msg.ID, "payload", string(msg.Payload))
 		return nil, true, fmt.Errorf("failed to unmarshal secure envelope from message %s: %w", msg.ID, err)
 	}
 
@@ -36,6 +39,8 @@ func EnvelopeTransformer(_ context.Context, msg *messagepipeline.Message) (*secu
 	envelope, err := secure.FromProto(envelopePB)
 	if err != nil {
 		// If we can't convert to a 'real' Envelope (e.g., invalid URN), fail.
+		// ADDED: Log the validation/conversion failure.
+		slog.Error("Failed to convert/validate envelope", "err", err, "msg_id", msg.ID)
 		return nil, true, fmt.Errorf("failed to convert/validate envelope from message %s: %w", msg.ID, err)
 	}
 

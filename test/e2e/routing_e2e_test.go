@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,7 +138,8 @@ func createTopic(t *testing.T, ctx context.Context, client *pubsub.Client, proje
 func TestFull_HotColdMigration_E2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	t.Cleanup(cancel)
-	logger := zerolog.New(zerolog.NewTestWriter(t))
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
 	const projectID = "test-project-e2e" // Project ID must match emulator
 	runID := uuid.NewString()
 
@@ -197,7 +199,7 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 	require.NoError(t, err)
 
 	// --- 3. Start the FULL Routing Service (API + ConnectionManager) ---
-	authMiddleware, err := middleware.NewJWKSAuthMiddleware(jwksServer.URL + "/.well-known/jwks.json")
+	authMiddleware, err := middleware.NewJWKSAuthMiddleware(jwksServer.URL+"/.well-known/jwks.json", logger)
 	require.NoError(t, err)
 
 	apiService, err := routingservice.New(testConfig, deps, authMiddleware, logger)
@@ -346,7 +348,7 @@ func assembleTestDependencies(
 	fsClient *firestore.Client,
 	cfg *config.AppConfig,
 	notifier routing.PushNotifier,
-	logger zerolog.Logger,
+	logger *slog.Logger,
 ) (*routing.ServiceDependencies, error) {
 
 	// Ingress Producer
@@ -365,7 +367,7 @@ func assembleTestDependencies(
 		return nil, fmt.Errorf("failed to create e2e ingress subscription: %w", err)
 	}
 	ingressConsumer, err := messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(ingressSubID), psClient, logger,
+		messagepipeline.NewGooglePubsubConsumerDefaults(ingressSubID), psClient, zerolog.Nop(),
 	)
 	if err != nil {
 		return nil, err
@@ -399,7 +401,7 @@ func assembleTestDependencies(
 		ctx,
 		&cache.FirestoreConfig{ProjectID: cfg.ProjectID, CollectionName: "device-tokens"},
 		fsClient,
-		logger,
+		zerolog.Nop(),
 	)
 	if err != nil {
 		return nil, err

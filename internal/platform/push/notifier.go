@@ -10,10 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog" // IMPORTED
 
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/rs/zerolog"
+	// "github.com/rs/zerolog" // REMOVED
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
 	// REFACTORED: Use new platform 'secure' package
@@ -33,7 +34,7 @@ type EventProducer interface {
 type PubSubNotifier struct {
 	// REFACTORED: Now uses the testable interface.
 	producer EventProducer
-	logger   zerolog.Logger
+	logger   *slog.Logger // CHANGED
 }
 
 // This is the new, simple, "dumb" notification contract.
@@ -51,14 +52,14 @@ type notificationContent struct {
 
 // NewPubSubNotifier creates a new push notification publisher.
 // REFACTORED: Signature now accepts the interface.
-func NewPubSubNotifier(producer EventProducer, logger zerolog.Logger) (*PubSubNotifier, error) {
+func NewPubSubNotifier(producer EventProducer, logger *slog.Logger) (*PubSubNotifier, error) { // CHANGED
 	if producer == nil {
 		return nil, fmt.Errorf("producer cannot be nil")
 	}
 
 	notifier := &PubSubNotifier{
 		producer: producer,
-		logger:   logger.With().Str("component", "PubSubNotifier").Logger(),
+		logger:   logger.With("component", "PubSubNotifier"), // CHANGED
 	}
 
 	return notifier, nil
@@ -68,8 +69,11 @@ func NewPubSubNotifier(producer EventProducer, logger zerolog.Logger) (*PubSubNo
 // routing data into the public NotificationRequest contract and publishes it.
 // REFACTORED: Signature now accepts *secure.SecureEnvelope
 func (n *PubSubNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
+	log := n.logger.With("recipient", envelope.RecipientID.String()) // ADDED
+
 	if len(tokens) == 0 {
-		return nil // Nothing to do
+		log.Debug("No device tokens provided, skipping push notification.") // ADDED
+		return nil                                                          // Nothing to do
 	}
 
 	// 1. Create the new "dumb" notification request.
@@ -78,6 +82,7 @@ func (n *PubSubNotifier) Notify(ctx context.Context, tokens []routing.DeviceToke
 	// 2. Marshal it using standard JSON.
 	payloadBytes, err := json.Marshal(request)
 	if err != nil {
+		log.Error("Failed to marshal new notification request", "err", err) // ADDED
 		return fmt.Errorf("failed to marshal new notification request: %w", err)
 	}
 
@@ -88,12 +93,14 @@ func (n *PubSubNotifier) Notify(ctx context.Context, tokens []routing.DeviceToke
 	}
 
 	// 4. Publish the message.
+	log.Debug("Publishing push notification request", "token_count", len(tokens), "msg_id", messageData.ID) // ADDED
 	_, err = n.producer.Publish(ctx, messageData)
 	if err != nil {
+		log.Error("Failed to publish push notification request", "err", err, "msg_id", messageData.ID) // ADDED
 		return fmt.Errorf("failed to publish push notification request: %w", err)
 	}
 
-	n.logger.Info().Int("token_count", len(tokens)).Msg("Push notification request published successfully.")
+	n.logger.Info("Push notification request published successfully", "token_count", len(tokens)) // CHANGED
 	return nil
 }
 
