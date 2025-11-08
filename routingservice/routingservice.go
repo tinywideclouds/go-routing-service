@@ -22,6 +22,7 @@ import (
 
 	// REFACTORED: Use new base server and platform types
 	"github.com/tinywideclouds/go-microservice-base/pkg/microservice"
+	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -68,6 +69,15 @@ func New(
 	// 4. Create the router and attach handlers.
 	mux := baseServer.Mux()
 
+	corsMiddleware := middleware.NewCorsMiddleware(cfg.CorsConfig, logger)
+	optionsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	// Apply the corsMiddleware to the OPTIONS routes
+	mux.Handle("OPTIONS /api/send", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /api/messages", corsMiddleware(optionsHandler))
+	mux.Handle("OPTIONS /api/messages/ack", corsMiddleware(optionsHandler))
+
+	logger.Debug("using cors:", "cors", cfg.CorsConfig)
+
 	sendHandler := http.HandlerFunc(apiHandler.SendHandler)
 	batchHandler := http.HandlerFunc(apiHandler.GetMessageBatchHandler)
 	ackHandler := http.HandlerFunc(apiHandler.AcknowledgeMessagesHandler)
@@ -76,9 +86,9 @@ func New(
 	authedBatchHandler := authMiddleware(batchHandler)
 	authedAckHandler := authMiddleware(ackHandler)
 
-	mux.Handle("POST /api/send", authedSendHandler)
-	mux.Handle("GET /api/messages", authedBatchHandler)
-	mux.Handle("POST /api/messages/ack", authedAckHandler)
+	mux.Handle("POST /api/send", corsMiddleware(authedSendHandler))
+	mux.Handle("GET /api/messages", corsMiddleware(authedBatchHandler))
+	mux.Handle("POST /api/messages/ack", corsMiddleware(authedAckHandler))
 
 	logger.Debug("API routes registered") // ADDED
 

@@ -2,6 +2,8 @@ package config
 
 import (
 	"log/slog" // IMPORTED
+
+	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
 
 // --- YAML-Specific Structs ---
@@ -39,7 +41,7 @@ type YamlConfig struct {
 	APIPort                  string                  `yaml:"api_port"`
 	WebSocketPort            string                  `yaml:"websocket_port"`
 	IdentityServiceURL       string                  `yaml:"identity_service_url"`
-	Cors                     YamlCorsConfig          `yaml:"cors"`
+	CorsConfig               YamlCorsConfig          `yaml:"cors"`
 	PresenceCache            YamlPresenceCacheConfig `yaml:"presence_cache"`
 	HotQueue                 YamlHotQueueConfig      `yaml:"hot_queue"`
 	ColdQueueCollection      string                  `yaml:"cold_queue_collection"`
@@ -59,12 +61,15 @@ func NewConfigFromYaml(yamlCfg *YamlConfig, logger *slog.Logger) (*AppConfig, er
 
 	// This mapping is 1:1, as AppConfig matches YamlConfig
 	appCfg := &AppConfig{
-		ProjectID:                yamlCfg.ProjectID,
-		RunMode:                  yamlCfg.RunMode,
-		APIPort:                  yamlCfg.APIPort,
-		WebSocketPort:            yamlCfg.WebSocketPort,
-		IdentityServiceURL:       yamlCfg.IdentityServiceURL,
-		Cors:                     yamlCfg.Cors,
+		ProjectID:          yamlCfg.ProjectID,
+		RunMode:            yamlCfg.RunMode,
+		APIPort:            yamlCfg.APIPort,
+		WebSocketPort:      yamlCfg.WebSocketPort,
+		IdentityServiceURL: yamlCfg.IdentityServiceURL,
+		CorsConfig: middleware.CorsConfig{
+			AllowedOrigins: yamlCfg.CorsConfig.AllowedOrigins,
+			Role:           middleware.CorsRole(yamlCfg.CorsConfig.Role),
+		},
 		PresenceCache:            yamlCfg.PresenceCache,
 		HotQueue:                 yamlCfg.HotQueue,
 		ColdQueueCollection:      yamlCfg.ColdQueueCollection,

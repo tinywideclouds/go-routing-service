@@ -10,8 +10,7 @@ import (
 	_ "embed" // Required for go:embed
 	"fmt"
 	"log/slog" // IMPORTED
-	"net/http"
-	"os" // IMPORTED
+	"os"       // IMPORTED
 
 	"cloud.google.com/go/firestore"
 	"cloud.google.com/go/pubsub/v2"
@@ -151,15 +150,6 @@ func main() {
 
 	// 8. Run the application
 	app.Run(ctx, logger, apiService, connManager) // CHANGED
-}
-
-// newAuthMiddleware creates the JWT-validating middleware.
-func newAuthMiddleware(cfg *config.AppConfig, logger *slog.Logger) (func(http.Handler) http.Handler, error) { // CHANGED
-	jwksURL, err := middleware.DiscoverAndValidateJWTConfig(cfg.IdentityServiceURL, middleware.RSA256, logger) // CHANGED
-	if err != nil {
-		return nil, fmt.Errorf("failed to discover OIDC config: %w", err)
-	}
-	return middleware.NewJWKSAuthMiddleware(jwksURL, logger) // CHANGED
 }
 
 // newDependencies builds the service dependency container.

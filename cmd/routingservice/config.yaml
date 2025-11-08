@@ -13,10 +13,10 @@ identity_service_url: "http://localhost:3000"
 
 cors:
   allowed_origins:
-    - "http://localhost:4200" # Angular default
-    - "http://localhost:3000" # React default
-    - "http://localhost:5173" # Vite default
-  role: "admin"
+    - "http://localhost:3000" # Common for React
+    - "http://localhost:4200" # Common for Angular
+    - "http://localhost:5173" # Common for Vite
+    - "http://localhost:8080" # Common for general dev servers
 
 presence_cache:
   type: "firestore"

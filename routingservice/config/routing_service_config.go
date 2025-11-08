@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog" // IMPORTED
 	"os"
+
+	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
 
 // --- Final Application Config Struct ---
@@ -17,7 +19,7 @@ type AppConfig struct {
 	APIPort                  string
 	WebSocketPort            string
 	IdentityServiceURL       string
-	Cors                     YamlCorsConfig
+	CorsConfig               middleware.CorsConfig
 	PresenceCache            YamlPresenceCacheConfig
 	HotQueue                 YamlHotQueueConfig
 	ColdQueueCollection      string
