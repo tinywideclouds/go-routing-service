@@ -1,7 +1,7 @@
 /*
 File: internal/platform/push/notifier.go
-Description: REFACTORED to be testable by depending on an
-'EventProducer' interface instead of a concrete producer.
+Description: REFACTORED to implement the explicit
+NotifyOffline and PokeOnline methods.
 */
 // Package push contains the concrete implementation for the PushNotifier interface.
 package push
@@ -10,79 +10,81 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog" // IMPORTED
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	// "github.com/rs/zerolog" // REMOVED
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
-	// REFACTORED: Use new platform 'secure' package
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// NEW: This interface matches the 'Publish' method on
-// 'messagepipeline.GooglePubsubProducer' and 'delivery.go'.
-// This makes the Notifier unit-testable.
+// EventProducer defines the interface for publishing a message.
 type EventProducer interface {
 	Publish(ctx context.Context, data messagepipeline.MessageData) (string, error)
 }
 
-// PubSubNotifier is a production-ready implementation of routing.PushNotifier.
-// It sends push notification requests to a dedicated Pub/Sub topic for the
-// notification-service to consume.
+// PubSubNotifier implements the routing.PushNotifier interface.
 type PubSubNotifier struct {
-	// REFACTORED: Now uses the testable interface.
 	producer EventProducer
-	logger   *slog.Logger // CHANGED
+	logger   *slog.Logger
 }
 
-// This is the new, simple, "dumb" notification contract.
+// notificationRequest is the "rich push" contract for offline devices.
 type notificationRequest struct {
 	Tokens  []routing.DeviceToken `json:"tokens"`
 	Content notificationContent   `json:"content"`
 }
 
-// Generic content for the push notification.
+// notificationContent is the generic content for a rich push.
 type notificationContent struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 	Sound string `json:"sound"`
 }
 
+// --- (NEW) pokeRequest is the "poke" contract for online clients ---
+type pokeRequest struct {
+	Type      string `json:"type"`
+	Recipient string `json:"recipient"`
+}
+
 // NewPubSubNotifier creates a new push notification publisher.
-// REFACTORED: Signature now accepts the interface.
-func NewPubSubNotifier(producer EventProducer, logger *slog.Logger) (*PubSubNotifier, error) { // CHANGED
+func NewPubSubNotifier(producer EventProducer, logger *slog.Logger) (*PubSubNotifier, error) {
 	if producer == nil {
 		return nil, fmt.Errorf("producer cannot be nil")
 	}
 
 	notifier := &PubSubNotifier{
 		producer: producer,
-		logger:   logger.With("component", "PubSubNotifier"), // CHANGED
+		logger:   logger.With("component", "PubSubNotifier"),
 	}
 
 	return notifier, nil
 }
 
-// Notify implements the routing.PushNotifier interface. It transforms the internal
-// routing data into the public NotificationRequest contract and publishes it.
-// REFACTORED: Signature now accepts *secure.SecureEnvelope
-func (n *PubSubNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
-	log := n.logger.With("recipient", envelope.RecipientID.String()) // ADDED
-
-	if len(tokens) == 0 {
-		log.Debug("No device tokens provided, skipping push notification.") // ADDED
-		return nil                                                          // Nothing to do
+// --- (REFACTORED) NotifyOffline implements the "rich push" path ---
+func (n *PubSubNotifier) NotifyOffline(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
+	// --- (NEW) Guard clause for nil envelope ---
+	if envelope == nil {
+		return fmt.Errorf("NotifyOffline failed: envelope cannot be nil")
 	}
 
-	// 1. Create the new "dumb" notification request.
+	log := n.logger.With("recipient", envelope.RecipientID.String())
+
+	if len(tokens) == 0 {
+		log.Debug("No device tokens provided, skipping push notification.")
+		return nil // Nothing to do
+	}
+
+	// 1. Create the "rich push" notification request.
 	request := createNotificationRequest(tokens)
 
 	// 2. Marshal it using standard JSON.
 	payloadBytes, err := json.Marshal(request)
 	if err != nil {
-		log.Error("Failed to marshal new notification request", "err", err) // ADDED
+		log.Error("Failed to marshal new notification request", "err", err)
 		return fmt.Errorf("failed to marshal new notification request: %w", err)
 	}
 
@@ -93,19 +95,53 @@ func (n *PubSubNotifier) Notify(ctx context.Context, tokens []routing.DeviceToke
 	}
 
 	// 4. Publish the message.
-	log.Debug("Publishing push notification request", "token_count", len(tokens), "msg_id", messageData.ID) // ADDED
+	log.Debug("Publishing push notification request", "token_count", len(tokens), "msg_id", messageData.ID)
 	_, err = n.producer.Publish(ctx, messageData)
 	if err != nil {
-		log.Error("Failed to publish push notification request", "err", err, "msg_id", messageData.ID) // ADDED
+		log.Error("Failed to publish push notification request", "err", err, "msg_id", messageData.ID)
 		return fmt.Errorf("failed to publish push notification request: %w", err)
 	}
 
-	n.logger.Info("Push notification request published successfully", "token_count", len(tokens)) // CHANGED
+	n.logger.Info("Push notification request published successfully", "token_count", len(tokens))
+	return nil
+}
+
+// --- (NEW) PokeOnline implements the "poke" path ---
+func (n *PubSubNotifier) PokeOnline(ctx context.Context, recipient urn.URN) error {
+	log := n.logger.With("recipient", recipient.String())
+
+	// 1. Create the lightweight "poke" payload
+	request := pokeRequest{
+		Type:      "poke",
+		Recipient: recipient.String(),
+	}
+
+	// 2. Marshal it
+	payloadBytes, err := json.Marshal(request)
+	if err != nil {
+		log.Error("Failed to marshal poke request", "err", err)
+		return fmt.Errorf("failed to marshal poke request: %w", err)
+	}
+
+	// 3. Create the dataflow message
+	messageData := messagepipeline.MessageData{
+		ID:      uuid.NewString(),
+		Payload: payloadBytes,
+	}
+
+	// 4. Publish the message
+	log.Debug("Publishing 'poke' request", "msg_id", messageData.ID)
+	_, err = n.producer.Publish(ctx, messageData)
+	if err != nil {
+		log.Error("Failed to publish poke request", "err", err, "msg_id", messageData.ID)
+		return fmt.Errorf("failed to publish poke request: %w", err)
+	}
+
+	n.logger.Info("'Poke' request published successfully")
 	return nil
 }
 
 // createNotificationRequest is a helper to build the public notification contract.
-// REFACTORED: This is now "dumb" and only includes generic content.
 func createNotificationRequest(tokens []routing.DeviceToken) *notificationRequest {
 	return &notificationRequest{
 		Tokens: tokens,

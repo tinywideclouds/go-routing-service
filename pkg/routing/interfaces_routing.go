@@ -8,7 +8,7 @@ package routing
 
 import (
 	"context"
-
+	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -21,8 +21,17 @@ type IngestionProducer interface {
 // type DeliveryProducer interface { ... }
 
 // PushNotifier defines the interface for sending push notifications.
+
+// PushNotifier defines the interface for notifying users of new messages,
+// whether they are online ("poke") or offline ("push").
 type PushNotifier interface {
-	Notify(ctx context.Context, tokens []DeviceToken, envelope *secure.SecureEnvelope) error
+	// NotifyOffline sends a rich push notification (with content) to a user's
+	// registered devices. This is for the "cold" path.
+	NotifyOffline(ctx context.Context, tokens []DeviceToken, envelope *secure.SecureEnvelope) error
+
+	// PokeOnline sends a lightweight "poke" notification to a specific
+	// user. This is for the "hot" path.
+	PokeOnline(ctx context.Context, recipient urn.URN) error
 }
 
 // DELETED: MessageStore interface

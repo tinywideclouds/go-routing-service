@@ -1,13 +1,14 @@
 /*
 File: internal/pipeline/routing_processor_test.go
 Description: REFACTORED to test the new 'queue.MessageQueue'
-and the hot/cold enqueue logic.
+and the explicit PushNotifier.PokeOnline/NotifyOffline methods.
 */
 package pipeline_test
 
 import (
 	"context"
 	"errors"
+	"io" // <-- ADDED
 	"log/slog"
 	"testing"
 
@@ -69,7 +70,6 @@ func (m *mockPresenceCache[K, V]) Close() error {
 	return args.Error(0)
 }
 
-// REFACTORED: Mock for queue.MessageQueue
 type mockMessageQueue struct {
 	mock.Mock
 }
@@ -99,27 +99,36 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 	return args.Error(0)
 }
 
-// REFACTORED: Renamed mock for clarity
+// --- START OF REFACTOR ---
+// REFACTORED: Mock for routing.PushNotifier
 type mockPushNotifier struct {
 	mock.Mock
 }
 
-func (m *mockPushNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
+func (m *mockPushNotifier) NotifyOffline(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
 	args := m.Called(ctx, tokens, envelope)
 	return args.Error(0)
 }
 
+func (m *mockPushNotifier) PokeOnline(ctx context.Context, recipient urn.URN) error {
+	args := m.Called(ctx, recipient)
+	return args.Error(0)
+}
+
+// --- END OF REFACTOR ---
+
 // --- Test Setup ---
 var (
-	nopLogger    = slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	testConfig   = &config.AppConfig{} // No longer needed for TopicID
+	// --- (FIX) Use io.Discard for a truly NOP logger ---
+	nopLogger    = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+	testConfig   = &config.AppConfig{}
 	testURN, _   = urn.Parse("urn:sm:user:test-user")
 	testEnvelope = &secure.SecureEnvelope{
 		RecipientID:   testURN,
 		EncryptedData: []byte("test"),
 	}
 	testMessage = messagepipeline.Message{}
-	testErr     = errors.New("something went wrong")
+	errTest     = errors.New("something went wrong")
 )
 
 // --- Test Cases ---
@@ -128,7 +137,7 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 	// Arrange
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	messageQueue := new(mockMessageQueue)
-	pushNotifier := new(mockPushNotifier) // Used for "poke"
+	pushNotifier := new(mockPushNotifier)
 	deps := &routing.ServiceDependencies{
 		PresenceCache: presenceCache,
 		MessageQueue:  messageQueue,
@@ -139,8 +148,11 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, nil)
 	// 2. Expect publish to HOT queue
 	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(nil)
-	// 3. Expect a "poke" notification (nil envelope, nil tokens)
-	pushNotifier.On("Notify", mock.Anything, []routing.DeviceToken(nil), (*secure.SecureEnvelope)(nil)).Return(nil)
+
+	// --- START OF REFACTOR ---
+	// 3. Expect a "poke" notification
+	pushNotifier.On("PokeOnline", mock.Anything, testURN).Return(nil)
+	// --- END OF REFACTOR ---
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
@@ -151,6 +163,8 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 	require.NoError(t, err)
 	mock.AssertExpectationsForObjects(t, presenceCache, messageQueue, pushNotifier)
 	messageQueue.AssertNotCalled(t, "EnqueueCold", mock.Anything, mock.Anything)
+	// --- (NEW) Assert NotifyOffline was not called ---
+	pushNotifier.AssertNotCalled(t, "NotifyOffline", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
@@ -175,11 +189,15 @@ func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
 	}
 
 	// 1. User is offline
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
+	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, errTest)
 	// 2. Fetches tokens
 	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return(testTokens, nil)
+
+	// --- START OF REFACTOR ---
 	// 3. Sends push notification (with full envelope)
-	pushNotifier.On("Notify", mock.Anything, expectedMobileTokens, testEnvelope).Return(nil)
+	pushNotifier.On("NotifyOffline", mock.Anything, expectedMobileTokens, testEnvelope).Return(nil)
+	// --- END OF REFACTOR ---
+
 	// 4. Stores message in COLD queue
 	messageQueue.On("EnqueueCold", mock.Anything, testEnvelope).Return(nil)
 
@@ -192,6 +210,8 @@ func TestRoutingProcessor_OfflineUser_WithMobileTokens(t *testing.T) {
 	require.NoError(t, err)
 	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, pushNotifier, messageQueue)
 	messageQueue.AssertNotCalled(t, "EnqueueHot", mock.Anything, mock.Anything)
+	// --- (NEW) Assert PokeOnline was not called ---
+	pushNotifier.AssertNotCalled(t, "PokeOnline", mock.Anything, mock.Anything)
 }
 
 func TestRoutingProcessor_OfflineUser_NoTokens(t *testing.T) {
@@ -208,7 +228,7 @@ func TestRoutingProcessor_OfflineUser_NoTokens(t *testing.T) {
 	}
 
 	// 1. User is offline
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
+	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, errTest)
 	// 2. Fetches tokens (but finds none)
 	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return([]routing.DeviceToken{}, nil)
 	// 3. Stores message in COLD queue
@@ -222,7 +242,9 @@ func TestRoutingProcessor_OfflineUser_NoTokens(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageQueue)
-	pushNotifier.AssertNotCalled(t, "Notify", mock.Anything, mock.Anything, mock.Anything)
+	// --- (NEW) Assert neither notifier method was called ---
+	pushNotifier.AssertNotCalled(t, "NotifyOffline", mock.Anything, mock.Anything, mock.Anything)
+	pushNotifier.AssertNotCalled(t, "PokeOnline", mock.Anything, mock.Anything)
 }
 
 func TestRoutingProcessor_CriticalStoreFailure(t *testing.T) {
@@ -238,11 +260,11 @@ func TestRoutingProcessor_CriticalStoreFailure(t *testing.T) {
 	}
 
 	// 1. User is offline
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, testErr)
+	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, errTest)
 	// 2. Fetches tokens (finds none)
 	deviceTokenFetcher.On("Fetch", mock.Anything, testURN).Return([]routing.DeviceToken{}, nil)
 	// 3. EnqueueCold fails (this IS critical)
-	messageQueue.On("EnqueueCold", mock.Anything, testEnvelope).Return(testErr)
+	messageQueue.On("EnqueueCold", mock.Anything, testEnvelope).Return(errTest)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
@@ -251,7 +273,7 @@ func TestRoutingProcessor_CriticalStoreFailure(t *testing.T) {
 
 	// Assert: The error from EnqueueCold should be propagated
 	require.Error(t, err)
-	assert.Equal(t, testErr, errors.Unwrap(err))
+	assert.Equal(t, errTest, errors.Unwrap(err))
 	mock.AssertExpectationsForObjects(t, presenceCache, deviceTokenFetcher, messageQueue)
 }
 
@@ -262,13 +284,15 @@ func TestRoutingProcessor_HotEnqueueFailure(t *testing.T) {
 	deps := &routing.ServiceDependencies{
 		PresenceCache: presenceCache,
 		MessageQueue:  messageQueue,
-		PushNotifier:  new(mockPushNotifier), // Not called, but need non-nil
+		PushNotifier:  new(mockPushNotifier),
 	}
 
 	// 1. User is online
 	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, nil)
-	// 2. EnqueueHot fails (the composite queue handles the fallback)
-	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(testErr)
+	// 2. EnqueueHot fails
+	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(errTest)
+
+	// --- (NEW) Assert PokeOnline is NOT called if EnqueueHot fails ---
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
@@ -277,6 +301,8 @@ func TestRoutingProcessor_HotEnqueueFailure(t *testing.T) {
 
 	// Assert: The error is propagated so the message is NACK'd
 	require.Error(t, err)
-	assert.Equal(t, testErr, errors.Unwrap(err))
+	assert.Equal(t, errTest, errors.Unwrap(err))
 	mock.AssertExpectationsForObjects(t, presenceCache, messageQueue)
+	// --- (NEW) Assert PokeOnline was not called ---
+	deps.PushNotifier.(*mockPushNotifier).AssertNotCalled(t, "PokeOnline", mock.Anything, mock.Anything)
 }

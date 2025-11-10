@@ -36,7 +36,7 @@ func TestNewConfigFromYaml(t *testing.T) {
 			IngressTopicDLQID:        "yaml-ingress-dlq",
 			PushNotificationsTopicID: "yaml-push-topic",
 			NumPipelineWorkers:       5,
-			Cors: config.YamlCorsConfig{
+			CorsConfig: config.YamlCorsConfig{
 				AllowedOrigins: []string{"http://yaml-origin.com"},
 				Role:           "yaml-role",
 			},
@@ -74,8 +74,8 @@ func TestNewConfigFromYaml(t *testing.T) {
 		assert.Equal(t, "yaml-ingress-dlq", cfg.IngressTopicDLQID)
 		assert.Equal(t, "yaml-push-topic", cfg.PushNotificationsTopicID)
 		assert.Equal(t, 5, cfg.NumPipelineWorkers)
-		assert.Equal(t, []string{"http://yaml-origin.com"}, cfg.Cors.AllowedOrigins)
-		assert.Equal(t, "yaml-role", cfg.Cors.Role)
+		assert.Equal(t, []string{"http://yaml-origin.com"}, cfg.CorsConfig.AllowedOrigins)
+		assert.Equal(t, "yaml-role", cfg.CorsConfig.Role)
 		assert.Equal(t, "firestore", cfg.PresenceCache.Type)
 		assert.Equal(t, "yaml-presence", cfg.PresenceCache.Firestore.MainCollectionName)
 		assert.Equal(t, "redis", cfg.HotQueue.Type)

@@ -93,8 +93,6 @@ func (s *FirestoreHotQueue) Enqueue(ctx context.Context, envelope *secure.Secure
 }
 
 // RetrieveBatch transactionally moves messages from the main queue to the pending queue.
-// This is the Firestore equivalent of RPOPLPUSH.
-// This query only uses a single OrderBy, so no composite index is needed.
 func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
 	mainCollectionRef := s.mainCollection(userURN)
 	pendingCollectionRef := s.pendingCollection(userURN)
@@ -139,8 +137,6 @@ func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, 
 			})
 
 			// 3. Perform the "move": Create in pending, then Delete from main.
-			// The new doc in the pending collection will have the *same ID*
-			// as the original document.
 			pendingDocRef := pendingCollectionRef.Doc(doc.Ref.ID)
 			if err := tx.Create(pendingDocRef, storedMsg); err != nil {
 				return err
@@ -198,34 +194,59 @@ func (s *FirestoreHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, me
 	return nil
 }
 
+// --- START OF FIX ---
+
+// deleteDocsFromCollection is a new helper for performing bulk deletes
+// on a *specific* collection.
+func (s *FirestoreHotQueue) deleteDocsFromCollection(ctx context.Context, collectionRef *firestore.CollectionRef, docIDs []string, log *slog.Logger) error {
+	if len(docIDs) == 0 {
+		return nil
+	}
+	bulkWriter := s.client.BulkWriter(ctx)
+	var firstErr error
+
+	for _, msgID := range docIDs {
+		docRef := collectionRef.Doc(msgID)
+		if _, err := bulkWriter.Delete(docRef); err != nil {
+			log.Error("Failed to enqueue doc for deletion", "err", err, "doc_id", msgID)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	bulkWriter.End()
+
+	return firstErr
+}
+
 // migrateCollection is a helper to move all docs from one collection to the cold queue
-func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef *firestore.CollectionRef, userURN urn.URN, destination queue.ColdQueue, log *slog.Logger) (int, error) { // CHANGED
+func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef *firestore.CollectionRef, destination queue.ColdQueue, log *slog.Logger) (int, error) { // CHANGED
 	var allEnvelopes []*secure.SecureEnvelope
 	var docIDsToDelete []string
 
-	log.Debug("Querying collection for migration") // ADDED
+	log.Debug("Querying collection for migration")
 	query := collectionRef.OrderBy("queued_at", firestore.Asc)
 	docSnaps, err := query.Documents(ctx).GetAll()
 	if err != nil {
-		log.Error("Failed to read collection for migration", "err", err) // ADDED
+		log.Error("Failed to read collection for migration", "err", err)
 		return 0, fmt.Errorf("failed to read collection for migration: %w", err)
 	}
 	if len(docSnaps) == 0 {
-		log.Debug("Collection empty, no migration needed") // ADDED
+		log.Debug("Collection empty, no migration needed")
 		return 0, nil
 	}
-	log.Debug("Found messages for migration", "count", len(docSnaps)) // ADDED
+	log.Debug("Found messages for migration", "count", len(docSnaps))
 
 	// 1. Unmarshal all messages
 	for _, doc := range docSnaps {
 		var storedMsg storedHotMessage
 		if err := doc.DataTo(&storedMsg); err != nil {
-			log.Error("Failed to unmarshal hot message for migration, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
+			log.Error("Failed to unmarshal hot message for migration, skipping", "err", err, "doc_id", doc.Ref.ID)
 			continue
 		}
 		nativeEnv, err := secure.FromProto(storedMsg.Envelope)
 		if err != nil {
-			log.Error("Failed to convert hot envelope for migration, skipping", "err", err, "doc_id", doc.Ref.ID) // CHANGED
+			log.Error("Failed to convert hot envelope for migration, skipping", "err", err, "doc_id", doc.Ref.ID)
 			continue
 		}
 		allEnvelopes = append(allEnvelopes, nativeEnv)
@@ -233,20 +254,22 @@ func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef
 	}
 
 	// 2. Enqueue them into the cold store.
-	log.Debug("Writing messages to cold queue", "count", len(allEnvelopes)) // ADDED
+	log.Debug("Writing messages to cold queue", "count", len(allEnvelopes))
 	for _, env := range allEnvelopes {
 		if err := destination.Enqueue(ctx, env); err != nil {
-			log.Error("Failed to write to cold queue during migration", "err", err) // ADDED
+			log.Error("Failed to write to cold queue during migration", "err", err)
 			return 0, fmt.Errorf("failed to write to cold queue during migration: %w", err)
 		}
 	}
 
 	// 3. All writes to cold succeeded. Now delete from hot.
-	log.Debug("Deleting messages from hot collection", "count", len(docIDsToDelete)) // ADDED
-	if err := s.Acknowledge(ctx, userURN, docIDsToDelete); err != nil {
+	// We call our new helper, passing the *correct* collectionRef.
+	log.Debug("Deleting messages from hot collection", "count", len(docIDsToDelete))
+	if err := s.deleteDocsFromCollection(ctx, collectionRef, docIDsToDelete, log); err != nil {
 		// This is non-fatal for the migration, but we must log it.
-		log.Error("Failed to delete messages from hot collection after migration. Duplicates will exist.", "err", err) // CHANGED
+		log.Error("Failed to delete messages from hot collection after migration. Duplicates will exist.", "err", err)
 	}
+	// --- END OF FIX ---
 
 	return len(allEnvelopes), nil
 }
@@ -260,7 +283,7 @@ func (s *FirestoreHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, 
 
 	// 1. Migrate the pending queue first (they are older)
 	log.Debug("Migrating pending collection...") // ADDED
-	pendingCount, err := s.migrateCollection(ctx, s.pendingCollection(userURN), userURN, destination, log)
+	pendingCount, err := s.migrateCollection(ctx, s.pendingCollection(userURN), destination, log)
 	if err != nil {
 		log.Error("Failed to migrate pending collection", "err", err) // ADDED
 		return fmt.Errorf("failed to migrate pending collection: %w", err)
@@ -268,7 +291,7 @@ func (s *FirestoreHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, 
 
 	// 2. Migrate the main queue
 	log.Debug("Migrating main collection...") // ADDED
-	mainCount, err := s.migrateCollection(ctx, s.mainCollection(userURN), userURN, destination, log)
+	mainCount, err := s.migrateCollection(ctx, s.mainCollection(userURN), destination, log)
 	if err != nil {
 		log.Error("Failed to migrate main collection", "err", err) // ADDED
 		return fmt.Errorf("failed to migrate main collection: %w", err)

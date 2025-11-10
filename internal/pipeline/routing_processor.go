@@ -1,7 +1,7 @@
 /*
 File: internal/pipeline/routing_processor.go
-Description: REFACTORED to use the new 'queue.MessageQueue' and implement
-the 'Hot/Cold' queue logic based on user presence.
+Description: REFACTORED to use the new 'queue.MessageQueue' and
+the explicit PushNotifier.PokeOnline/NotifyOffline methods.
 */
 package pipeline
 
@@ -28,7 +28,7 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 
 		// 1. Check if the user is online via the presence cache.
 		if _, err := deps.PresenceCache.Fetch(ctx, recipientURN); err == nil {
-			// --- REFACTORED: HOT PATH ---
+			// --- HOT PATH ---
 			procLogger.Info("User is online. Routing message to HOT queue.") // CHANGED
 			if err := deps.MessageQueue.EnqueueHot(ctx, envelope); err != nil {
 				// If EnqueueHot fails, it automatically falls back to cold.
@@ -37,18 +37,18 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 				return fmt.Errorf("failed to enqueue message (hot and cold fallback): %w", err)
 			}
 
+			// --- START OF REFACTOR ---
 			// After successful enqueue, send a "poke" notification.
-			// We send a 'nil' envelope to signal this is a "poke", not a push.
-			procLogger.Debug("Sending 'poke' notification") // ADDED
-			if err := deps.PushNotifier.Notify(ctx, nil, nil); err != nil {
+			procLogger.Debug("Sending 'poke' notification")
+			if err := deps.PushNotifier.PokeOnline(ctx, recipientURN); err != nil {
 				// Non-critical, just log it. The message is already queued.
-				procLogger.Warn("Failed to send online 'poke' notification", "err", err) // CHANGED
+				procLogger.Warn("Failed to send online 'poke' notification", "err", err)
 			}
+			// --- END OF REFACTOR ---
 			return nil
-			// --- END REFACTOR ---
 		}
 
-		// --- REFACTORED: COLD PATH ---
+		// --- COLD PATH ---
 		// 2. User is offline. Fetch their device tokens for push notifications.
 		procLogger.Info("User is offline. Checking for push notification tokens.") // CHANGED
 		tokens, err := deps.DeviceTokenFetcher.Fetch(ctx, recipientURN)
@@ -68,11 +68,15 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 		// 4. Send mobile notifications.
 		if len(mobileTokens) > 0 {
 			procLogger.Info("Routing notification to push notification service", "count", len(mobileTokens)) // CHANGED
+
+			// --- START OF REFACTOR ---
 			// We send the *full* envelope here for a rich push.
-			if err := deps.PushNotifier.Notify(ctx, mobileTokens, envelope); err != nil {
-				procLogger.Error("Push notifier failed. Message will be stored, but this error is logged.", "err", err) // CHANGED
+			if err := deps.PushNotifier.NotifyOffline(ctx, mobileTokens, envelope); err != nil {
+				procLogger.Error("Push notifier failed. Message will be stored, but this error is logged.", "err", err)
 				// Non-critical. We still must store.
 			}
+			// --- END OF REFACTOR ---
+
 		} else {
 			procLogger.Debug("User is offline but has no mobile tokens. Storing in cold queue only.") // ADDED
 		}
@@ -85,8 +89,5 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 			return fmt.Errorf("failed to store message in cold queue: %w", err)
 		}
 		return nil
-		// --- END REFACTOR ---
 	}
 }
-
-// DELETED: storeMessage helper function

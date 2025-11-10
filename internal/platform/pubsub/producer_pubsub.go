@@ -56,6 +56,7 @@ func (p *Producer) Publish(ctx context.Context, envelope *secure.SecureEnvelope)
 		slog.ErrorContext(ctx, "Failed to marshal envelope for publishing", "err", err, "recipient", envelope.RecipientID.String())
 		return fmt.Errorf("failed to marshal envelope for publishing: %w", err)
 	}
+	slog.DebugContext(ctx, "Envelope marshaled for publishing", "size_bytes", len(payloadBytes), "recipient", envelope.RecipientID.String()) // ADDED
 
 	// Create the pubsub.Message directly.
 	message := &pubsub.Message{

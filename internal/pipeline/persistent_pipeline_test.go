@@ -89,8 +89,13 @@ type mockPPushNotifier struct {
 	mock.Mock
 }
 
-func (m *mockPPushNotifier) Notify(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
+func (m *mockPPushNotifier) NotifyOffline(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
 	args := m.Called(ctx, tokens, envelope)
+	return args.Error(0)
+}
+
+func (m *mockPPushNotifier) PokeOnline(ctx context.Context, urn urn.URN) error {
+	args := m.Called(ctx, urn)
 	return args.Error(0)
 }
 
@@ -161,7 +166,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	streamingService, err := messagepipeline.NewStreamingService[secure.SecureEnvelope](
+	streamingService, err := messagepipeline.NewStreamingService(
 		messagepipeline.StreamingServiceConfig{NumWorkers: cfg.NumPipelineWorkers},
 		consumer,
 		pipeline.EnvelopeTransformer,

@@ -1,6 +1,7 @@
 /*
 File: internal/platform/push/notifier_test.go
-Description: NEW unit test for the PubSubNotifier.
+Description: REFACTORED to test the new NotifyOffline and
+PokeOnline methods of the PubSubNotifier.
 */
 package push_test
 
@@ -34,14 +35,12 @@ func (m *mockEventProducer) Publish(ctx context.Context, data messagepipeline.Me
 	return args.String(0), args.Error(1)
 }
 
-// TestNotify tests the PubSubNotifier's core logic
-func TestNotify(t *testing.T) {
+// --- TestNotifyOffline tests the "rich push" path ---
+func TestNotifyOffline(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	testURN, _ := urn.Parse("urn:sm:user:test-user")
 
-	// The envelope is now only used to satisfy the interface,
-	// its content should NOT be in the push.
 	testEnvelope := &secure.SecureEnvelope{
 		RecipientID:   testURN,
 		EncryptedData: []byte("this-should-not-be-in-the-push"),
@@ -58,7 +57,6 @@ func TestNotify(t *testing.T) {
 		notifier, err := push.NewPubSubNotifier(producer, logger)
 		require.NoError(t, err)
 
-		// We capture the MessageData sent to the producer
 		var capturedData messagepipeline.MessageData
 		producer.On("Publish", ctx, mock.Anything).
 			Run(func(args mock.Arguments) {
@@ -67,14 +65,11 @@ func TestNotify(t *testing.T) {
 			Return("mock-message-id", nil)
 
 		// Act
-		err = notifier.Notify(ctx, testTokens, testEnvelope)
+		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope) // <-- METHOD RENAMED
 
 		// Assert
 		require.NoError(t, err)
 		producer.AssertCalled(t, "Publish", ctx, mock.Anything)
-
-		// This is the most important assertion:
-		// We verify the payload is "dumb" and contains no metadata.
 
 		// 1. Unmarshal the outer payload
 		var actualRequest struct {
@@ -100,7 +95,7 @@ func TestNotify(t *testing.T) {
 		require.NoError(t, err)
 
 		// Act
-		err = notifier.Notify(ctx, []routing.DeviceToken{}, testEnvelope)
+		err = notifier.NotifyOffline(ctx, []routing.DeviceToken{}, testEnvelope) // <-- METHOD RENAMED
 
 		// Assert
 		require.NoError(t, err)
@@ -117,7 +112,79 @@ func TestNotify(t *testing.T) {
 		producer.On("Publish", ctx, mock.Anything).Return("", testErr)
 
 		// Act
-		err = notifier.Notify(ctx, testTokens, testEnvelope)
+		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope) // <-- METHOD RENAMED
+
+		// Assert
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), testErr.Error())
+	})
+
+	t.Run("Failure - Nil envelope returns error", func(t *testing.T) {
+		// Arrange
+		producer := new(mockEventProducer)
+		notifier, err := push.NewPubSubNotifier(producer, logger)
+		require.NoError(t, err)
+
+		// Act
+		err = notifier.NotifyOffline(ctx, testTokens, nil) // <-- Pass nil envelope
+
+		// Assert
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "envelope cannot be nil")
+		producer.AssertNotCalled(t, "Publish")
+	})
+}
+
+// --- (NEW TEST) TestPokeOnline tests the "poke" path ---
+func TestPokeOnline(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+	testURN, _ := urn.Parse("urn:sm:user:test-user")
+
+	t.Run("Success - Publishes a 'poke' payload", func(t *testing.T) {
+		// Arrange
+		producer := new(mockEventProducer)
+		notifier, err := push.NewPubSubNotifier(producer, logger)
+		require.NoError(t, err)
+
+		var capturedData messagepipeline.MessageData
+		producer.On("Publish", ctx, mock.Anything).
+			Run(func(args mock.Arguments) {
+				capturedData = args.Get(1).(messagepipeline.MessageData)
+			}).
+			Return("mock-poke-id", nil)
+
+		// Act
+		err = notifier.PokeOnline(ctx, testURN)
+
+		// Assert
+		require.NoError(t, err)
+		producer.AssertCalled(t, "Publish", ctx, mock.Anything)
+
+		// 1. Unmarshal the poke payload
+		var actualPoke struct {
+			Type      string `json:"type"`
+			Recipient string `json:"recipient"`
+		}
+		err = json.Unmarshal(capturedData.Payload, &actualPoke)
+		require.NoError(t, err, "Failed to unmarshal the poke payload")
+
+		// 2. Assert its contents
+		assert.Equal(t, "poke", actualPoke.Type)
+		assert.Equal(t, testURN.String(), actualPoke.Recipient)
+	})
+
+	t.Run("Failure - Producer returns error", func(t *testing.T) {
+		// Arrange
+		producer := new(mockEventProducer)
+		notifier, err := push.NewPubSubNotifier(producer, logger)
+		require.NoError(t, err)
+
+		testErr := errors.New("pubsub failed")
+		producer.On("Publish", ctx, mock.Anything).Return("", testErr)
+
+		// Act
+		err = notifier.PokeOnline(ctx, testURN)
 
 		// Assert
 		require.Error(t, err)

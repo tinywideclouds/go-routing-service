@@ -336,7 +336,7 @@ func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *
 	)
 }
 
-func newPresenceCache(ctx context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger *slog.Logger) (cache.PresenceCache[urn.URN, routing.ConnectionInfo], error) { // CHANGED
+func newPresenceCache(_ context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger *slog.Logger) (cache.PresenceCache[urn.URN, routing.ConnectionInfo], error) { // CHANGED
 	cacheType := cfg.PresenceCache.Type
 	logger.Info("Initializing presence cache...", "type", cacheType) // CHANGED
 	switch cacheType {

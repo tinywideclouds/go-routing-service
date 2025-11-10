@@ -1,7 +1,7 @@
 /*
 File: internal/api/routing_handlers.go
 Description: REFACTORED to use the new 'queue.MessageQueue' interface
-instead of the old 'routing.MessageStore'.
+and FIX bug in URN parsing.
 */
 package api
 
@@ -58,7 +58,6 @@ func (a *API) Wait() {
 func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
-		// This should be caught by middleware, but good to double-check.
 		a.logger.Warn("SendHandler: No user ID in context") // ADDED
 		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
 		return
@@ -79,7 +78,6 @@ func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ADDED: Log with recipient for better traceability
 	log = log.With("recipient", envelope.RecipientID.String())
 	log.Debug("Publishing message to ingestion topic")
 
@@ -101,12 +99,16 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
 		return
 	}
-	userURN, err := urn.New(urn.SecureMessaging, urn.EntityTypeUser, authedUserID)
+
+	// --- START OF FIX ---
+	// The authedUserID is a full URN string, so we must PARSE it.
+	userURN, err := urn.Parse(authedUserID)
 	if err != nil {
-		a.logger.Error("Failed to create URN from authed user ID", "err", err, "user", authedUserID) // CHANGED
+		a.logger.Error("Failed to PARSE URN from authed user ID", "err", err, "user", authedUserID)
 		response.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// --- END OF FIX ---
 
 	// Parse 'limit' query parameter
 	limit := defaultBatchLimit
@@ -126,8 +128,6 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 
 	log := a.logger.With("user", userURN.String(), "limit", limit) // CHANGED
 
-	// 1. Call the queue to get the batch of wrapper messages
-	// REFACTORED: Call queue.RetrieveBatch
 	log.Debug("Retrieving message batch...") // ADDED
 	queuedMessages, err := a.queue.RetrieveBatch(r.Context(), userURN, limit)
 	if err != nil {
@@ -136,12 +136,10 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Wrap them in the native list struct
 	messageList := &routingTypes.QueuedMessageList{
 		Messages: queuedMessages,
 	}
 
-	// 3. Send the JSON response
 	log.Info("Successfully retrieved message batch", "count", len(queuedMessages)) // CHANGED
 	response.WriteJSON(w, http.StatusOK, messageList)
 }
@@ -154,14 +152,17 @@ func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request)
 		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
 		return
 	}
-	userURN, err := urn.New(urn.SecureMessaging, urn.EntityTypeUser, authedUserID)
+
+	// --- START OF FIX ---
+	// The authedUserID is a full URN string, so we must PARSE it.
+	userURN, err := urn.Parse(authedUserID)
 	if err != nil {
-		a.logger.Error("Failed to create URN from authed user ID", "err", err, "user", authedUserID) // CHANGED
+		a.logger.Error("Failed to PARSE URN from authed user ID", "err", err, "user", authedUserID)
 		response.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	// --- END OF FIX ---
 
-	// 1. Parse the simple JSON body: {"messageIds": ["id1", "id2"]}
 	var ackBody struct {
 		MessageIDs []string `json:"messageIds"`
 	}
@@ -180,18 +181,14 @@ func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request)
 
 	log := a.logger.With("user", userURN.String(), "count", len(ackBody.MessageIDs)) // CHANGED
 
-	// 2. Call the queue to delete the messages
-	// This runs in a background goroutine.
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		// Create new context for background task
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		log.Info("Acknowledging messages in background...") // ADDED
 
-		// REFACTORED: Call queue.Acknowledge
 		if err := a.queue.Acknowledge(ctx, userURN, ackBody.MessageIDs); err != nil {
 			log.Error("Failed to acknowledge/delete messages in background", "err", err) // CHANGED
 		} else {
@@ -199,7 +196,6 @@ func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request)
 		}
 	}()
 
-	// 3. Respond 204 No Content immediately.
 	log.Debug("Ack request received, responding 204") // ADDED
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -76,7 +76,7 @@ var (
 	authedUserID     = "test-user-id-123"
 	authedUserURN, _ = urn.New(urn.SecureMessaging, urn.EntityTypeUser, authedUserID)
 	testAuthContext  = middleware.ContextWithUserID(context.Background(), authedUserID)
-	testErr          = errors.New("something went wrong")
+	errTest          = errors.New("something went wrong")
 )
 
 func newTestEnvelope(t *testing.T) *secure.SecureEnvelope {
@@ -136,7 +136,7 @@ func TestSendHandler(t *testing.T) {
 	t.Run("Failure - 500 Internal Server Error on Publish failure", func(t *testing.T) {
 		producer := new(mockIngestionProducer)
 		apiHandler := api.NewAPI(producer, nil, testLogger)
-		producer.On("Publish", mock.Anything, testEnvelope).Return(testErr)
+		producer.On("Publish", mock.Anything, testEnvelope).Return(errTest)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewReader(testBody))
 		req = req.WithContext(testAuthContext)
@@ -216,7 +216,7 @@ func TestGetMessageBatchHandler(t *testing.T) {
 	t.Run("Failure - 500 Internal Server Error on Store failure", func(t *testing.T) {
 		queue := new(mockMessageQueue)
 		apiHandler := api.NewAPI(nil, queue, testLogger)
-		queue.On("RetrieveBatch", mock.Anything, authedUserURN, defaultBatchLimit).Return(nil, testErr)
+		queue.On("RetrieveBatch", mock.Anything, authedUserURN, defaultBatchLimit).Return(nil, errTest)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/messages", nil)
 		req = req.WithContext(testAuthContext)
@@ -277,7 +277,7 @@ func TestAcknowledgeMessagesHandler(t *testing.T) {
 	t.Run("Success - Store failure is handled in background", func(t *testing.T) {
 		queue := new(mockMessageQueue)
 		apiHandler := api.NewAPI(nil, queue, testLogger)
-		queue.On("Acknowledge", mock.Anything, authedUserURN, expectedIDs).Return(testErr)
+		queue.On("Acknowledge", mock.Anything, authedUserURN, expectedIDs).Return(errTest)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/messages/ack", strings.NewReader(ackBody))
 		req = req.WithContext(testAuthContext)
