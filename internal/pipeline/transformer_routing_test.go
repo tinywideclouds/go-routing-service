@@ -1,8 +1,4 @@
-/*
-File: internal/pipeline/transformer_routing_test.go
-Description: REFACTORED to fix the 'Failure_-_Invalid_URN' test
-by providing a payload that is guaranteed to fail URN parsing.
-*/
+// --- File: internal/pipeline/transformer_routing_test.go ---
 package pipeline_test
 
 import (
@@ -16,7 +12,6 @@ import (
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
@@ -25,7 +20,6 @@ func TestEnvelopeTransformer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 
-	// REFACTORED: Create a valid "dumb" envelope
 	recipientURN, err := urn.Parse("urn:sm:user:user-bob")
 	require.NoError(t, err)
 
@@ -37,16 +31,14 @@ func TestEnvelopeTransformer(t *testing.T) {
 	validPayload, err := protojson.Marshal(secure.ToProto(&validEnvelope))
 	require.NoError(t, err, "Setup: failed to marshal valid envelope")
 
-	// --- THIS IS THE FIX ---
-	// REFACTORED: This payload will now correctly fail the
-	// "entity type must not be empty" check in urn.Parse().
+	// This payload will correctly fail the "entity type must not be empty"
+	// check in urn.Parse() when secure.FromProto() is called.
 	invalidPayload := []byte(`{"recipientId": "urn:sm::invalid-id"}`)
-	// --- END FIX ---
 
 	testCases := []struct {
 		name                  string
 		inputMessage          *messagepipeline.Message
-		expectedEnvelope      *secure.SecureEnvelope // REFACTORED: Updated type
+		expectedEnvelope      *secure.SecureEnvelope
 		expectedSkip          bool
 		expectError           bool
 		expectedErrorContains string
@@ -81,7 +73,7 @@ func TestEnvelopeTransformer(t *testing.T) {
 			inputMessage: &messagepipeline.Message{
 				MessageData: messagepipeline.MessageData{
 					ID:      "msg-789",
-					Payload: invalidPayload, // Now using the corrected payload
+					Payload: invalidPayload,
 				},
 			},
 			expectedEnvelope:      nil,

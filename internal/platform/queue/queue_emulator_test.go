@@ -1,10 +1,6 @@
+// --- File: internal/platform/queue/queue_emulator_test.go ---
 //go:build integration
 
-/*
-File: internal/platform/queue/queue_emulator_test.go
-Description: NEW integration test for the RedisHotQueue and FirestoreColdQueue
-working together. This validates the "zombie" migration path.
-*/
 package queue_test
 
 import (
@@ -29,14 +25,11 @@ import (
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
-
-	// Protobuf types
-	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 )
 
 // emulatorTestFixture holds all resources for the combined test
 type emulatorTestFixture struct {
-	ctx                context.Context
+	ctx                context.Context // This will be the timed test context
 	rdb                *redis.Client
 	fsClient           *firestore.Client
 	hotQueue           queue.HotQueue
@@ -47,26 +40,30 @@ type emulatorTestFixture struct {
 // setupEmulatorSuite initializes BOTH emulators
 func setupEmulatorSuite(t *testing.T) *emulatorTestFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second) // Longer timeout for two emulators
+	// This context is for test operations (e.g., Enqueue, Retrieve)
+	testCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second) // Longer timeout for two emulators
 	t.Cleanup(cancel)
 
 	const projectID = "test-project-emulator"
 	const coldCollectionName = "emulator-test-cold-queue"
 
+	// --- FIX: Pass context.Background() for container lifecycle ---
 	// 1. Start Redis Emulator
 	redisCfg := emulators.GetDefaultRedisImageContainer()
-	redisConnInfo := emulators.SetupRedisContainer(t, ctx, redisCfg)
+	redisConnInfo := emulators.SetupRedisContainer(t, context.Background(), redisCfg)
 	rdb := redis.NewClient(&redis.Options{
 		Addr: redisConnInfo.EmulatorAddress,
 		DB:   0,
 	})
 	t.Cleanup(func() { _ = rdb.Close() })
-	err := rdb.FlushDB(ctx).Err()
+	err := rdb.FlushDB(testCtx).Err() // Use testCtx for setup operations
 	require.NoError(t, err)
 
 	// 2. Start Firestore Emulator
-	fsEmulator := emulators.SetupFirestoreEmulator(t, ctx, emulators.GetDefaultFirestoreConfig(projectID))
-	fsClient, err := firestore.NewClient(ctx, projectID, fsEmulator.ClientOptions...)
+	fsEmulator := emulators.SetupFirestoreEmulator(t, context.Background(), emulators.GetDefaultFirestoreConfig(projectID))
+
+	// Create client with context.Background() so it's not tied to testCtx
+	fsClient, err := firestore.NewClient(context.Background(), projectID, fsEmulator.ClientOptions...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = fsClient.Close() })
 
@@ -79,7 +76,7 @@ func setupEmulatorSuite(t *testing.T) *emulatorTestFixture {
 	require.NoError(t, err)
 
 	return &emulatorTestFixture{
-		ctx:                ctx,
+		ctx:                testCtx, // Store the timed context
 		rdb:                rdb,
 		fsClient:           fsClient,
 		hotQueue:           hotQueue,
@@ -110,17 +107,10 @@ func emulatorDocExists(t *testing.T, ctx context.Context, docRef *firestore.Docu
 	return false
 }
 
-// emulatorStoredMessageForTest is a self-contained test helper struct.
-type emulatorStoredMessageForTest struct {
-	QueuedAt time.Time                  `firestore:"queued_at"`
-	Envelope *securev1.SecureEnvelopePb `firestore:"envelope"`
-}
-
 // TestEmulator_RedisRetrieveAndAck validates the normal Redis flow
-// (This is copied from hot_queue_redis_test.go and adapted)
 func TestEmulator_RedisRetrieveAndAck(t *testing.T) {
 	fixture := setupEmulatorSuite(t)
-	ctx := fixture.ctx
+	ctx := fixture.ctx // Use the timed test context from the fixture
 
 	recipientURN, _ := urn.Parse("urn:sm:user:redis-user-1")
 	queueKey := "queue:" + recipientURN.String()
@@ -175,7 +165,7 @@ func TestEmulator_RedisRetrieveAndAck(t *testing.T) {
 // TestEmulator_RedisMigrateToCold validates the fallback flow
 func TestEmulator_RedisMigrateToCold(t *testing.T) {
 	fixture := setupEmulatorSuite(t)
-	ctx := fixture.ctx
+	ctx := fixture.ctx // Use the timed test context from the fixture
 
 	recipientURN, _ := urn.Parse("urn:sm:user:redis-migrate-user")
 	queueKey := "queue:" + recipientURN.String()

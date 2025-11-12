@@ -1,7 +1,6 @@
 /*
 File: internal/api/routing_handlers_test.go
-Description: REFACTORED to mock and test the new 'queue.MessageQueue'
-interface instead of the old 'routing.MessageStore'.
+Description: Unit tests for the routing service API handlers.
 */
 package api_test
 
@@ -20,15 +19,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"github.com/tinywideclouds/go-routing-service/internal/api"
-	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
+	"github.com/tinywideclouds/go-routing-service/internal/api"
 )
 
-const defaultBatchLimit = 50 // REFACTORED: Changed to 50 to match handler
+// defaultBatchLimit matches the handler's default.
+const defaultBatchLimit = 50
 
 // --- Mocks ---
 type mockIngestionProducer struct {
@@ -40,7 +39,7 @@ func (m *mockIngestionProducer) Publish(ctx context.Context, envelope *secure.Se
 	return args.Error(0)
 }
 
-// REFACTORED: This mock now implements queue.MessageQueue
+// mockMessageQueue implements the queue.MessageQueue interface.
 type mockMessageQueue struct {
 	mock.Mock
 }

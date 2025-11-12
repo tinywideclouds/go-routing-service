@@ -1,3 +1,4 @@
+// --- File: internal/queue/interfaces.go ---
 // Package queue defines the interfaces for the message queuing system.
 package queue
 
@@ -34,12 +35,14 @@ type HotQueue interface {
 	Queue
 
 	// MigrateToCold moves all messages for a user from this HotQueue
-	// to the provided ColdQueue destination.
+	// to the provided ColdQueue destination. This is typically triggered
+	// when a user disconnects.
 	MigrateToCold(ctx context.Context, userURN urn.URN, destination ColdQueue) error
 }
 
 // MessageQueue is the high-level, unified interface for interacting
-// with the hot/cold queuing system.
+// with the hot/cold queuing system. It is the single dependency for
+// the rest of the application.
 type MessageQueue interface {
 	// EnqueueHot attempts to enqueue a message to the fast, transient "hot" queue.
 	// If the hot queue fails, it MUST fall back to the cold queue.
@@ -53,6 +56,7 @@ type MessageQueue interface {
 	RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error)
 
 	// Acknowledge acknowledges a message from *whichever* queue it came from.
+	// It is responsible for routing the ack to both hot and cold storage.
 	Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error
 
 	// MigrateHotToCold triggers the migration of a user's entire hot queue

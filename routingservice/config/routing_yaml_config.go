@@ -1,40 +1,47 @@
+// --- File: routingservice/config/routing_yaml_config.go ---
 package config
 
 import (
-	"log/slog" // IMPORTED
+	"log/slog"
 
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
 
 // --- YAML-Specific Structs ---
 
+// YamlRedisConfig defines the YAML structure for Redis.
 type YamlRedisConfig struct {
 	Addr string `yaml:"addr"`
 }
 
+// YamlFirestoreConfig defines the YAML structure for Firestore.
 type YamlFirestoreConfig struct {
 	MainCollectionName    string `yaml:"main_collection_name"`
 	PendingCollectionName string `yaml:"pending_collection_name"`
 }
 
+// YamlHotQueueConfig defines the YAML structure for the hot queue.
 type YamlHotQueueConfig struct {
 	Type      string              `yaml:"type"` // "firestore" or "redis"
 	Redis     YamlRedisConfig     `yaml:"redis"`
 	Firestore YamlFirestoreConfig `yaml:"firestore"`
 }
 
+// YamlPresenceCacheConfig defines the YAML structure for the presence cache.
 type YamlPresenceCacheConfig struct {
 	Type      string              `yaml:"type"`
 	Redis     YamlRedisConfig     `yaml:"redis"`
 	Firestore YamlFirestoreConfig `yaml:"firestore"`
 }
 
+// YamlCorsConfig defines the YAML structure for CORS.
 type YamlCorsConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 	Role           string   `yaml:"role"`
 }
 
 // YamlConfig defines the structure for unmarshaling the embedded config.yaml file.
+// This struct is the "Stage 0" raw representation of the YAML.
 type YamlConfig struct {
 	ProjectID                string                  `yaml:"project_id"`
 	RunMode                  string                  `yaml:"run_mode"`
@@ -55,9 +62,9 @@ type YamlConfig struct {
 // --- Stage 1 Function ---
 
 // NewConfigFromYaml converts the raw unmarshaled data (YamlConfig) into a clean, base AppConfig struct.
-// Stage 1 complete: The AppConfig struct now exists, but without environment overrides.
-func NewConfigFromYaml(yamlCfg *YamlConfig, logger *slog.Logger) (*AppConfig, error) { // CHANGED
-	logger.Debug("Mapping YAML config to base config struct") // ADDED
+// This function completes "Stage 1" of configuration loading.
+func NewConfigFromYaml(yamlCfg *YamlConfig, logger *slog.Logger) (*AppConfig, error) {
+	logger.Debug("Mapping YAML config to base config struct")
 
 	// This mapping is 1:1, as AppConfig matches YamlConfig
 	appCfg := &AppConfig{
@@ -80,7 +87,6 @@ func NewConfigFromYaml(yamlCfg *YamlConfig, logger *slog.Logger) (*AppConfig, er
 		NumPipelineWorkers:       yamlCfg.NumPipelineWorkers,
 	}
 
-	// ADDED: Log key values for traceability
 	logger.Debug("YAML config mapping complete",
 		"project_id", appCfg.ProjectID,
 		"api_port", appCfg.APIPort,

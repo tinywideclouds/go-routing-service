@@ -2,9 +2,10 @@
 
 /*
 File: internal/pipeline/persistent_pipeline_test.go
-Description: REFACTORED to test the full "cold path" pipeline
-using the new 'CompositeMessageQueue' and 'ServiceDependencies'.
+Description: Full integration test for the pipeline's "cold path",
+validating persistence to Firestore using real emulators.
 */
+
 package pipeline_test
 
 import (
@@ -24,28 +25,26 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/illmade-knight/go-test/emulators"
-	"github.com/rs/zerolog"
+	"github.com/rs/zerolog" // Keep zerolog for the external library
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
-	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue" // NEW
-	"github.com/tinywideclouds/go-routing-service/internal/queue"                  // NEW
+	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	// REFACTORED: Use new platform packages
-	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	routingv1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// --- Test Helpers ---
+// --- Test Mocks (for dependencies not under test) ---
 
-// REFACTORED: Use the mock from the processor test
 type mockTokenFetcher struct {
 	mock.Mock
 }
@@ -63,7 +62,6 @@ func (m *mockTokenFetcher) Close() error {
 	return args.Error(0)
 }
 
-// NEW: We only need to mock the HotQueue, as ColdQueue is what we're testing.
 type mockHotQueue struct {
 	mock.Mock
 }
@@ -99,57 +97,57 @@ func (m *mockPPushNotifier) PokeOnline(ctx context.Context, urn urn.URN) error {
 	return args.Error(0)
 }
 
-// This is the struct *actually* stored by FirestoreColdQueue
+// storedMessageForTest is the struct *actually* stored by FirestoreColdQueue
 type storedMessageForTest struct {
 	QueuedAt time.Time                  `firestore:"queued_at"`
 	Envelope *securev1.SecureEnvelopePb `firestore:"envelope"`
 }
 
 // TestPersistentPipeline_Integration validates the full "offline" path.
+// It starts a real pipeline service with emulators and mocks.
+// It publishes a message to Pub/Sub and verifies it is correctly stored
+// in the Firestore cold queue.
 func TestPersistentPipeline_Integration(t *testing.T) {
-	// 1. Arrange: Set up emulators
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancel)
+	// 1. Arrange: Top-level context, IDs, and logger
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel) // Will run last
+
 	const projectID = "test-project-pipeline"
 	runID := uuid.NewString()
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+	const coldCollection = "test-cold-queue"
 
-	// 1. Setup Emulators
-	pubsubConn := emulators.SetupPubsubEmulator(t, ctx, emulators.GetDefaultPubsubConfig(projectID))
+	// 2. Arrange: Emulators and Clients
+	// Emulators register their own container.Terminate cleanup first.
+	pubsubConn := emulators.SetupPubsubEmulator(t, context.Background(), emulators.GetDefaultPubsubConfig(projectID))
 	psClient, err := pubsub.NewClient(ctx, projectID, pubsubConn.ClientOptions...)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = psClient.Close() })
 
-	firestoreConn := emulators.SetupFirestoreEmulator(t, ctx, emulators.GetDefaultFirestoreConfig(projectID))
-	fsClient, err := firestore.NewClient(context.Background(), projectID, firestoreConn.ClientOptions...)
+	firestoreConn := emulators.SetupFirestoreEmulator(t, context.Background(), emulators.GetDefaultFirestoreConfig(projectID))
+	fsClient, err := firestore.NewClient(ctx, projectID, firestoreConn.ClientOptions...)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = fsClient.Close() })
 
-	// 3. Arrange: Create Dependencies
+	// 3. Arrange: Dependencies (Mocks and Real Firestore Queue)
 	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]() // User is offline
-
-	// --- REFACTORED: Use new CompositeMessageQueue ---
-	const coldCollection = "test-cold-queue"
-	store, err := fsqueue.NewFirestoreColdQueue(fsClient, coldCollection, logger) // Real ColdQueue
+	store, err := fsqueue.NewFirestoreColdQueue(fsClient, coldCollection, logger)
 	require.NoError(t, err)
 
-	mockHot := new(mockHotQueue) // Mocked HotQueue
+	mockHot := new(mockHotQueue)
+	// Force the hot queue to "fail" so the composite queue falls back to cold.
+	mockHot.On("Enqueue", mock.Anything, mock.Anything).Return(fmt.Errorf("hot queue is offline"))
 
-	messageQueue, err := queue.NewCompositeMessageQueue(mockHot, store, logger) // Composite
+	messageQueue, err := queue.NewCompositeMessageQueue(mockHot, store, logger)
 	require.NoError(t, err)
-	// --- END REFACTOR ---
 
 	tokenFetcher := new(mockTokenFetcher)
 	tokenFetcher.On("Fetch", mock.Anything, mock.Anything).Return([]routing.DeviceToken{}, nil) // No tokens
-
-	pushNotifier := new(mockPPushNotifier) // Will not be called
+	pushNotifier := new(mockPPushNotifier)
 
 	deps := &routing.ServiceDependencies{
 		PresenceCache:      presenceCache,
-		MessageQueue:       messageQueue, // Use new composite queue
+		MessageQueue:       messageQueue,
 		DeviceTokenFetcher: tokenFetcher,
 		PushNotifier:       pushNotifier,
-		// DELETED: DeliveryProducer
 	}
 
 	// 4. Arrange: Create the REAL pipeline service
@@ -157,8 +155,8 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	ingestSubID := "ingress-sub-" + runID
 	createPubsubResources(t, ctx, psClient, projectID, ingressTopicID, ingestSubID)
 
+	// Use a noisy logger for pipeline debugging if necessary
 	noisyZerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-
 	cfg := &config.AppConfig{NumPipelineWorkers: 1}
 	processor := pipeline.NewRoutingProcessor(deps, cfg, logger)
 	consumer, err := messagepipeline.NewGooglePubsubConsumer(
@@ -175,7 +173,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// 5. Arrange: Create test data
+	// 5. Arrange: Create test data publisher
 	recipientURN, _ := urn.Parse("urn:sm:user:test-offline-user")
 	originalEnvelope := &secure.SecureEnvelope{
 		RecipientID:   recipientURN,
@@ -184,28 +182,66 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	originalPayload, err := protojson.Marshal(secure.ToProto(originalEnvelope))
 	require.NoError(t, err)
 
-	// 6. Act: Start the pipeline, publish the message, and stop
-	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
-	defer pipelineCancel()
+	ingestPublisher := psClient.Publisher(ingressTopicID)
 
+	// 6. Arrange: LIFO Cleanup Stack
+	// We register cleanup functions in the reverse order they should run.
+	// Emulators' internal t.Cleanup (terminating containers) will run *after* all these.
+
+	// Will run 4th (after clients): Stop the test publisher
+	t.Cleanup(func() {
+		t.Log("Cleanup (4): Stopping ingest publisher...")
+		ingestPublisher.Stop()
+		t.Log("Cleanup (4): Ingest publisher stopped.")
+	})
+
+	// Will run 3rd: Close Firestore client
+	t.Cleanup(func() {
+		t.Log("Cleanup (3): Closing Firestore client...")
+		if err := fsClient.Close(); err != nil {
+			t.Logf("Cleanup (3): fsClient.Close() error: %v", err)
+		}
+		t.Log("Cleanup (3): Firestore client closed.")
+	})
+
+	// Will run 2nd: Close Pub/Sub client
+	t.Cleanup(func() {
+		t.Log("Cleanup (2): Closing Pub/Sub client...")
+		if err := psClient.Close(); err != nil {
+			t.Logf("Cleanup (2): psClient.Close() error: %v", err)
+		}
+		t.Log("Cleanup (2): Pub/Sub client closed.")
+	})
+
+	// Will run 1st: Stop the streaming service
+	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
+	t.Cleanup(func() {
+		t.Log("Cleanup (1): Shutting down streaming service...")
+		pipelineCancel() // Tell the pipeline to stop
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stopCancel()
+		if err := streamingService.Stop(stopCtx); err != nil {
+			t.Logf("Cleanup (1): Error stopping streaming service: %v", err)
+		}
+		t.Log("Cleanup (1): Streaming service stopped.")
+	})
+
+	// 7. Act: Start the pipeline, publish the message
 	go func() {
 		_ = streamingService.Start(pipelineCtx)
 	}()
-
 	time.Sleep(100 * time.Millisecond) // Give service a moment to start
 
-	ingestPublisher := psClient.Publisher(ingressTopicID)
 	_, err = ingestPublisher.Publish(ctx, &pubsub.Message{Data: originalPayload}).Get(ctx)
 	require.NoError(t, err, "Failed to publish test message")
 
-	// 7. Assert: Check Firestore for the stored message
-	// The pipeline should process and store the message in the COLD queue
+	// 8. Assert: Check Firestore for the stored message
 	require.Eventually(t, func() bool {
 		docs, err := fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
 		return err == nil && len(docs) == 1
 	}, 10*time.Second, 100*time.Millisecond, "Message was not stored in Firestore")
 
-	// 8. Final Verification: Retrieve the message and assert data integrity.
+	// 9. Final Verification: Retrieve the message and assert data integrity.
 	docs, err := fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
 	require.NoError(t, err)
 	var storedData storedMessageForTest
@@ -218,12 +254,9 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	assert.Equal(t, originalEnvelope.EncryptedData, storedEnvelope.EncryptedData, "EncryptedData was corrupted in the pipeline")
 	assert.WithinDuration(t, time.Now(), storedData.QueuedAt, 15*time.Second, "QueuedAt timestamp was not set")
 	t.Log("✅ Pipeline integration test passed. Data integrity verified.")
-
-	// 9. Cleanup
-	pipelineCancel()
-	_ = streamingService.Stop(ctx)
 }
 
+// createPubsubResources is a test helper to create topics and subscriptions.
 func createPubsubResources(t *testing.T, ctx context.Context, client *pubsub.Client, projectID, topicID, subID string) {
 	t.Helper()
 	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)

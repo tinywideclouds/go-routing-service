@@ -1,20 +1,15 @@
-/*
-File: internal/platform/pubsub/producer_pubsub.go
-Description: REFACTORED to use the new 'secure.SecureEnvelope'
-facade and types.
-*/
+// --- File: internal/platform/pubsub/producer_pubsub.go ---
 // Package pubsub contains concrete adapters for interacting with Google Cloud Pub/Sub.
 package pubsub
 
 import (
 	"context"
 	"fmt"
-	"log/slog" // IMPORTED
+	"log/slog"
 
 	"cloud.google.com/go/pubsub/v2"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	// REFACTORED: Use new platform 'secure' package
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -22,7 +17,7 @@ import (
 // This allows us to use a mock for testing.
 type pubsubTopicClient interface {
 	Publish(ctx context.Context, msg *pubsub.Message) *pubsub.PublishResult
-	String() string // ADDED: For logging the topic name
+	String() string // For logging the topic name
 }
 
 // Producer implements the routing.IngestionProducer interface.
@@ -40,41 +35,36 @@ func NewProducer(topic pubsubTopicClient) *Producer {
 	}
 }
 
-// Publish serializes the SecureEnvelope and sends it to the message bus.
-// It conforms to the routing.IngestionProducer interface.
-// REFACTORED: Signature now accepts *secure.SecureEnvelope
+// Publish serializes the SecureEnvelope into its Protobuf JSON representation
+// and sends it to the message bus.
 func (p *Producer) Publish(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	// REFACTORED: Convert the native Go envelope to its Protobuf representation
-	// using the new facade.
+	// Convert the native Go envelope to its Protobuf representation.
 	protoEnvelope := secure.ToProto(envelope)
 
-	// REFACTORED: Serialize the Protobuf message using protojson, which matches
-	// the unmarshaler used by the EnvelopeTransformer.
+	// Serialize the Protobuf message using protojson.
 	payloadBytes, err := protojson.Marshal(protoEnvelope)
 	if err != nil {
-		// ADDED: Log marshaling error
 		slog.ErrorContext(ctx, "Failed to marshal envelope for publishing", "err", err, "recipient", envelope.RecipientID.String())
 		return fmt.Errorf("failed to marshal envelope for publishing: %w", err)
 	}
-	slog.DebugContext(ctx, "Envelope marshaled for publishing", "size_bytes", len(payloadBytes), "recipient", envelope.RecipientID.String()) // ADDED
+	slog.DebugContext(ctx, "Envelope marshaled for publishing", "size_bytes", len(payloadBytes), "recipient", envelope.RecipientID.String())
 
 	// Create the pubsub.Message directly.
 	message := &pubsub.Message{
 		Data: payloadBytes,
 	}
 
-	slog.DebugContext(ctx, "Publishing message to Pub/Sub", "topic", p.topic.String(), "recipient", envelope.RecipientID.String()) // ADDED
+	slog.DebugContext(ctx, "Publishing message to Pub/Sub", "topic", p.topic.String(), "recipient", envelope.RecipientID.String())
 
 	// Publish the message and wait for the result.
 	result := p.topic.Publish(ctx, message)
 	msgID, err := result.Get(ctx)
 	if err != nil {
-		// ADDED: Log publish error
 		slog.ErrorContext(ctx, "Failed to publish message", "err", err, "topic", p.topic.String(), "recipient", envelope.RecipientID.String())
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
 
-	slog.DebugContext(ctx, "Message published successfully", "topic", p.topic.String(), "msg_id", msgID) // ADDED
+	slog.DebugContext(ctx, "Message published successfully", "topic", p.topic.String(), "msg_id", msgID)
 
 	return nil
 }

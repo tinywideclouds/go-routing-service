@@ -1,16 +1,11 @@
-/*
-File: internal/queue/message_queue.go
-Description: NEW FILE. Defines the high-level composite MessageQueue
-interface and its concrete implementation.
-*/
+// --- File: internal/queue/message_queue.go ---
 package queue
 
 import (
 	"context"
 	"fmt"
-	"log/slog" // IMPORTED
+	"log/slog"
 
-	// "github.com/rs/zerolog" // REMOVED
 	// Platform packages
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/routing/v1"
@@ -18,15 +13,17 @@ import (
 )
 
 // CompositeMessageQueue is the concrete implementation of MessageQueue.
-// It orchestrates the hot and cold queues.
+// It orchestrates a HotQueue and a ColdQueue to provide a single, unified
+// queuing interface to the application.
 type CompositeMessageQueue struct {
 	hot    HotQueue
 	cold   ColdQueue
-	logger *slog.Logger // CHANGED
+	logger *slog.Logger
 }
 
 // NewCompositeMessageQueue creates a new composite queue.
-func NewCompositeMessageQueue(hot HotQueue, cold ColdQueue, logger *slog.Logger) (MessageQueue, error) { // CHANGED
+// It requires non-nil hot and cold queue implementations.
+func NewCompositeMessageQueue(hot HotQueue, cold ColdQueue, logger *slog.Logger) (MessageQueue, error) {
 	if hot == nil {
 		return nil, fmt.Errorf("hot queue cannot be nil")
 	}
@@ -36,24 +33,24 @@ func NewCompositeMessageQueue(hot HotQueue, cold ColdQueue, logger *slog.Logger)
 	return &CompositeMessageQueue{
 		hot:    hot,
 		cold:   cold,
-		logger: logger.With("component", "composite_queue"), // CHANGED
+		logger: logger.With("component", "composite_queue"),
 	}, nil
 }
 
 // EnqueueHot attempts to use the hot queue, but falls back to cold on error.
-// This guarantees at-least-once delivery even if Redis is down.
+// This guarantees at-least-once delivery even if the hot queue (e.g., Redis) is down.
 func (c *CompositeMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	log := c.logger.With("user", envelope.RecipientID.String()) // ADDED
+	log := c.logger.With("user", envelope.RecipientID.String())
 
 	if err := c.hot.Enqueue(ctx, envelope); err != nil {
-		log.Error("Hot queue enqueue failed. Falling back to cold queue.", "err", err) // CHANGED
+		log.Error("Hot queue enqueue failed. Falling back to cold queue.", "err", err)
 
 		// Fallback to cold queue
 		if errCold := c.cold.Enqueue(ctx, envelope); errCold != nil {
-			log.Error("FATAL: Hot and Cold queue enqueue failed.", "err_cold", errCold, "err_hot", err) // CHANGED
+			log.Error("FATAL: Hot and Cold queue enqueue failed.", "err_cold", errCold, "err_hot", err)
 			return errCold
 		}
-		log.Warn("Message enqueued to cold queue as hot-fallback.") // ADDED
+		log.Warn("Message enqueued to cold queue as hot-fallback.")
 	}
 	return nil
 }
@@ -64,33 +61,34 @@ func (c *CompositeMessageQueue) EnqueueCold(ctx context.Context, envelope *secur
 	return c.cold.Enqueue(ctx, envelope)
 }
 
-// RetrieveBatch checks hot, then cold.
+// RetrieveBatch checks the hot queue first. If it is empty or fails,
+// it falls back to checking the cold queue.
 func (c *CompositeMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
-	log := c.logger.With("user", userURN.String()) // ADDED
+	log := c.logger.With("user", userURN.String())
 
 	// 1. Try the hot queue first.
-	log.Debug("Retrieving batch from hot queue...") // ADDED
+	log.Debug("Retrieving batch from hot queue...")
 	hotMessages, err := c.hot.RetrieveBatch(ctx, userURN, limit)
 	if err != nil {
-		log.Error("Failed to retrieve from hot queue. Falling back to cold.", "err", err) // CHANGED
+		log.Error("Failed to retrieve from hot queue. Falling back to cold.", "err", err)
 		// Don't return the error, just fall back to cold.
 	}
 
 	// If we got messages from the hot queue, return them immediately.
 	if len(hotMessages) > 0 {
-		log.Debug("Retrieved batch from hot queue", "count", len(hotMessages)) // ADDED
+		log.Debug("Retrieved batch from hot queue", "count", len(hotMessages))
 		return hotMessages, nil
 	}
 
 	// 2. Hot queue was empty (or failed), so try the cold queue.
-	log.Debug("Hot queue empty, retrieving batch from cold queue...") // ADDED
+	log.Debug("Hot queue empty, retrieving batch from cold queue...")
 	coldMessages, err := c.cold.RetrieveBatch(ctx, userURN, limit)
 	if err != nil {
-		log.Error("Failed to retrieve from cold queue", "err", err) // ADDED
-		return nil, err                                             // Return the cold queue error
+		log.Error("Failed to retrieve from cold queue", "err", err)
+		return nil, err // Return the cold queue error
 	}
 
-	if len(coldMessages) > 0 { // ADDED
+	if len(coldMessages) > 0 {
 		log.Debug("Retrieved batch from cold queue", "count", len(coldMessages))
 	} else {
 		log.Debug("No messages found in hot or cold queues")
@@ -99,17 +97,18 @@ func (c *CompositeMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.U
 	return coldMessages, nil
 }
 
-// Acknowledge must be sent to *both* queues.
-// The queues are responsible for handling non-existent IDs.
+// Acknowledge sends the acknowledgment to *both* queues in parallel.
+// The underlying hot/cold implementations are responsible for handling
+// non-existent IDs gracefully (e.g., Redis LRem returning 0).
 func (c *CompositeMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
-	log := c.logger.With("user", userURN.String()) // ADDED
+	log := c.logger.With("user", userURN.String())
 
-	if len(messageIDs) == 0 { // ADDED
+	if len(messageIDs) == 0 {
 		log.Debug("Acknowledge called with no message IDs, skipping.")
 		return nil
 	}
 
-	log.Debug("Acknowledging messages in parallel", "count", len(messageIDs)) // ADDED
+	log.Debug("Acknowledging messages in parallel", "count", len(messageIDs))
 
 	// We run them in parallel.
 	errChan := make(chan error, 2)
@@ -117,7 +116,7 @@ func (c *CompositeMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN
 	go func() {
 		err := c.hot.Acknowledge(ctx, userURN, messageIDs)
 		if err != nil {
-			log.Error("Hot queue acknowledge failed", "err", err) // CHANGED
+			log.Error("Hot queue acknowledge failed", "err", err)
 		}
 		errChan <- err
 	}()
@@ -125,7 +124,7 @@ func (c *CompositeMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN
 	go func() {
 		err := c.cold.Acknowledge(ctx, userURN, messageIDs)
 		if err != nil {
-			log.Error("Cold queue acknowledge failed", "err", err) // CHANGED
+			log.Error("Cold queue acknowledge failed", "err", err)
 		}
 		errChan <- err
 	}()
@@ -134,7 +133,7 @@ func (c *CompositeMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN
 	err1 := <-errChan
 	err2 := <-errChan
 
-	log.Debug("Acknowledge complete", "hot_err", err1, "cold_err", err2) // ADDED
+	log.Debug("Acknowledge complete", "hot_err", err1, "cold_err", err2)
 
 	if err1 != nil {
 		return err1
@@ -142,17 +141,18 @@ func (c *CompositeMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN
 	return err2
 }
 
-// MigrateHotToCold triggers the hot queue's migration logic.
+// MigrateHotToCold triggers the hot queue's migration logic, passing it
+// a reference to the cold queue as the destination.
 func (c *CompositeMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN) error {
-	log := c.logger.With("user", userURN.String()) // ADDED
-	log.Info("Triggering hot-to-cold migration")   // ADDED
+	log := c.logger.With("user", userURN.String())
+	log.Info("Triggering hot-to-cold migration")
 
 	err := c.hot.MigrateToCold(ctx, userURN, c.cold)
-	if err != nil { // ADDED
+	if err != nil {
 		log.Error("Hot-to-cold migration failed", "err", err)
 		return err
 	}
 
-	log.Info("Hot-to-cold migration finished successfully") // ADDED
+	log.Info("Hot-to-cold migration finished successfully")
 	return nil
 }

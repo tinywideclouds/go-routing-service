@@ -1,8 +1,6 @@
-/*
-File: pkg/routing/routing.go
-Description: NEW FILE. Consolidates core domain types and the
-ServiceDependencies struct (moved from config_routing.go).
-*/
+// --- File: pkg/routing/routing.go ---
+// Package routing consolidates core domain types and service dependency
+// definitions for the routing service.
 package routing
 
 import (
@@ -14,6 +12,7 @@ import (
 )
 
 // ConnectionInfo holds details about a user's real-time connection.
+// This is stored in the presence cache.
 type ConnectionInfo struct {
 	ServerInstanceID string `json:"serverInstanceId"`
 	ConnectedAt      int64  `json:"connectedAt"`
@@ -26,7 +25,7 @@ type DeviceToken struct {
 }
 
 // ServiceDependencies holds all the external services the routing service needs to operate.
-// (Formerly 'Dependencies' in config_routing.go)
+// This struct is used for dependency injection.
 type ServiceDependencies struct {
 	// --- Producers ---
 	IngestionProducer IngestionProducer

@@ -1,8 +1,4 @@
-/*
-File: internal/platform/push/notifier.go
-Description: REFACTORED to implement the explicit
-NotifyOffline and PokeOnline methods.
-*/
+// --- File: internal/platform/push/notifier.go ---
 // Package push contains the concrete implementation for the PushNotifier interface.
 package push
 
@@ -25,7 +21,8 @@ type EventProducer interface {
 	Publish(ctx context.Context, data messagepipeline.MessageData) (string, error)
 }
 
-// PubSubNotifier implements the routing.PushNotifier interface.
+// PubSubNotifier implements the routing.PushNotifier interface by publishing
+// JSON payloads to a Google Cloud Pub/Sub topic.
 type PubSubNotifier struct {
 	producer EventProducer
 	logger   *slog.Logger
@@ -44,7 +41,7 @@ type notificationContent struct {
 	Sound string `json:"sound"`
 }
 
-// --- (NEW) pokeRequest is the "poke" contract for online clients ---
+// pokeRequest is the "poke" contract for online clients.
 type pokeRequest struct {
 	Type      string `json:"type"`
 	Recipient string `json:"recipient"`
@@ -64,9 +61,9 @@ func NewPubSubNotifier(producer EventProducer, logger *slog.Logger) (*PubSubNoti
 	return notifier, nil
 }
 
-// --- (REFACTORED) NotifyOffline implements the "rich push" path ---
+// NotifyOffline implements the "rich push" path of the PushNotifier interface.
+// It sends a payload containing device tokens and generic content.
 func (n *PubSubNotifier) NotifyOffline(ctx context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
-	// --- (NEW) Guard clause for nil envelope ---
 	if envelope == nil {
 		return fmt.Errorf("NotifyOffline failed: envelope cannot be nil")
 	}
@@ -106,7 +103,8 @@ func (n *PubSubNotifier) NotifyOffline(ctx context.Context, tokens []routing.Dev
 	return nil
 }
 
-// --- (NEW) PokeOnline implements the "poke" path ---
+// PokeOnline implements the "poke" path of the PushNotifier interface.
+// It sends a lightweight payload with the recipient's URN.
 func (n *PubSubNotifier) PokeOnline(ctx context.Context, recipient urn.URN) error {
 	log := n.logger.With("recipient", recipient.String())
 

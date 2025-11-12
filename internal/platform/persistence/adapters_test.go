@@ -1,7 +1,4 @@
-/*
-File: internal/platform/persistence/adapters_test.go
-Description: NEW unit test for the persistence adapters.
-*/
+// --- File: internal/platform/persistence/adapters_test.go ---
 package persistence_test
 
 import (

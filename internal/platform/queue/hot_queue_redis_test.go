@@ -1,9 +1,6 @@
+// --- File: internal/platform/queue/hot_queue_redis_test.go ---
 //go:build integration
 
-/*
-File: internal/platform/queue/redis_hot_queue_test.go
-Description: NEW integration test for the 'RedisHotQueue' implementation.
-*/
 package queue_test
 
 import (
@@ -11,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time" // Added time import
 
 	"github.com/illmade-knight/go-test/emulators" // Import your emulator pkg
 	"github.com/redis/go-redis/v9"
@@ -27,7 +25,7 @@ import (
 
 // redisTestFixture holds resources for testing the redis hot queue.
 type redisTestFixture struct {
-	ctx       context.Context
+	ctx       context.Context // This will be the timed test context
 	rdb       *redis.Client
 	hotQueue  queue.HotQueue
 	coldQueue queue.ColdQueue // Mocked cold queue
@@ -52,11 +50,14 @@ func (m *mockColdQueue) Acknowledge(ctx context.Context, userURN urn.URN, messag
 // setupRedisSuite initializes the emulator and a real Redis client.
 func setupRedisSuite(t *testing.T) (context.Context, *redisTestFixture) {
 	t.Helper()
-	ctx := context.Background()
+	// This context is for test operations (e.g., Enqueue, Retrieve)
+	testCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
 
 	// 1. Start Redis Emulator
+	// --- FIX: Pass context.Background() for container lifecycle ---
 	cfg := emulators.GetDefaultRedisImageContainer()
-	connInfo := emulators.SetupRedisContainer(t, ctx, cfg)
+	connInfo := emulators.SetupRedisContainer(t, context.Background(), cfg)
 
 	// 2. Create Real Redis Client
 	rdb := redis.NewClient(&redis.Options{
@@ -65,7 +66,7 @@ func setupRedisSuite(t *testing.T) (context.Context, *redisTestFixture) {
 	})
 	t.Cleanup(func() { _ = rdb.Close() })
 
-	err := rdb.FlushDB(ctx).Err()
+	err := rdb.FlushDB(testCtx).Err() // Use testCtx for setup operations
 	require.NoError(t, err)
 
 	// 3. Create RedisHotQueue
@@ -73,8 +74,8 @@ func setupRedisSuite(t *testing.T) (context.Context, *redisTestFixture) {
 	hotQueue, err := fsqueue.NewRedisHotQueue(rdb, logger)
 	require.NoError(t, err)
 
-	return ctx, &redisTestFixture{
-		ctx:       ctx,
+	return testCtx, &redisTestFixture{
+		ctx:       testCtx, // Store the timed context
 		rdb:       rdb,
 		hotQueue:  hotQueue,
 		coldQueue: &mockColdQueue{},
@@ -82,7 +83,7 @@ func setupRedisSuite(t *testing.T) (context.Context, *redisTestFixture) {
 }
 
 func TestRedisHotEnqueueRetrieveAcknowledge(t *testing.T) {
-	ctx, fixture := setupRedisSuite(t)
+	ctx, fixture := setupRedisSuite(t) // ctx is the timed testCtx
 
 	recipientURN, _ := urn.Parse("urn:sm:user:redis-user-1")
 	queueKey := "queue:" + recipientURN.String()
@@ -156,7 +157,7 @@ func TestRedisHotEnqueueRetrieveAcknowledge(t *testing.T) {
 }
 
 func TestRedisMigrateToCold(t *testing.T) {
-	ctx, fixture := setupRedisSuite(t)
+	ctx, fixture := setupRedisSuite(t) // ctx is the timed testCtx
 
 	recipientURN, _ := urn.Parse("urn:sm:user:redis-migrate-user")
 	queueKey := "queue:" + recipientURN.String()

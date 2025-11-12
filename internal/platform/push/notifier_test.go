@@ -1,8 +1,4 @@
-/*
-File: internal/platform/push/notifier_test.go
-Description: REFACTORED to test the new NotifyOffline and
-PokeOnline methods of the PubSubNotifier.
-*/
+// --- File: internal/platform/push/notifier_test.go ---
 package push_test
 
 import (
@@ -35,7 +31,7 @@ func (m *mockEventProducer) Publish(ctx context.Context, data messagepipeline.Me
 	return args.String(0), args.Error(1)
 }
 
-// --- TestNotifyOffline tests the "rich push" path ---
+// TestNotifyOffline tests the "rich push" path
 func TestNotifyOffline(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
@@ -65,7 +61,7 @@ func TestNotifyOffline(t *testing.T) {
 			Return("mock-message-id", nil)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope) // <-- METHOD RENAMED
+		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope)
 
 		// Assert
 		require.NoError(t, err)
@@ -95,7 +91,7 @@ func TestNotifyOffline(t *testing.T) {
 		require.NoError(t, err)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, []routing.DeviceToken{}, testEnvelope) // <-- METHOD RENAMED
+		err = notifier.NotifyOffline(ctx, []routing.DeviceToken{}, testEnvelope)
 
 		// Assert
 		require.NoError(t, err)
@@ -112,7 +108,7 @@ func TestNotifyOffline(t *testing.T) {
 		producer.On("Publish", ctx, mock.Anything).Return("", testErr)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope) // <-- METHOD RENAMED
+		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope)
 
 		// Assert
 		require.Error(t, err)
@@ -126,7 +122,7 @@ func TestNotifyOffline(t *testing.T) {
 		require.NoError(t, err)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, testTokens, nil) // <-- Pass nil envelope
+		err = notifier.NotifyOffline(ctx, testTokens, nil) // Pass nil envelope
 
 		// Assert
 		require.Error(t, err)
@@ -135,7 +131,7 @@ func TestNotifyOffline(t *testing.T) {
 	})
 }
 
-// --- (NEW TEST) TestPokeOnline tests the "poke" path ---
+// TestPokeOnline tests the "poke" path
 func TestPokeOnline(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))

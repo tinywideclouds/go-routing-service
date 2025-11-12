@@ -32,3 +32,5 @@ go.work.sum
 # .vscode/
 
 *__debug*.exe*
+
+.env.test

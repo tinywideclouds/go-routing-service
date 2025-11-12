@@ -1,8 +1,7 @@
 /*
 File: internal/realtime/connectionmanager_test.go
-Description: REFACTORED to be a true integration test.
-It now uses a real mock JWKS server and the *real*
-NewJWKSWebsocketAuthMiddleware, removing NoopAuth.
+Description: Integration test for the ConnectionManager,
+verifying real-time connection, authentication, and disconnection.
 */
 package realtime
 
@@ -29,7 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
-	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	routingv1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
@@ -59,7 +57,7 @@ func (m *mockPresenceCache) Close() error {
 	return args.Error(0)
 }
 
-// REFACTORED: Mock for queue.MessageQueue
+// mockMessageQueue implements the queue.MessageQueue interface.
 type mockMessageQueue struct {
 	mock.Mock
 }
@@ -89,10 +87,10 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 	return args.Error(0)
 }
 
-// --- NEW: Test Helpers (from jwt_test.go) ---
+// --- Test Helpers ---
 const testKeyID = "test-key-id-1"
 
-func createTestRS256Token(t *testing.T, userID, keyID string, privateKey *rsa.PrivateKey) (string, error) {
+func createTestRS256Token(_ *testing.T, userID, keyID string, privateKey *rsa.PrivateKey) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"sub": userID,
 		"iat": time.Now().Unix(),
@@ -117,7 +115,7 @@ func newMockJWKSServer(t *testing.T, keyID string, publicKey *rsa.PublicKey) *ht
 	}))
 }
 
-// --- REFACTORED: testFixture ---
+// --- Test Fixture ---
 type testFixture struct {
 	cm            *ConnectionManager
 	presenceCache *mockPresenceCache
@@ -125,7 +123,7 @@ type testFixture struct {
 	wsServer      *httptest.Server
 	userURN       urn.URN
 	wg            *sync.WaitGroup
-	token         string // NEW: Store the valid token
+	token         string // Stores the valid token
 }
 
 // setup creates a test fixture for the ConnectionManager.
@@ -137,7 +135,7 @@ func setup(t *testing.T) *testFixture {
 	presenceCache := new(mockPresenceCache)
 	messageQueue := new(mockMessageQueue)
 
-	// --- NEW: Create Real Auth ---
+	// 2. Create Real Auth Dependencies
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	mockJWKSServer := newMockJWKSServer(t, testKeyID, &privateKey.PublicKey)
@@ -151,19 +149,18 @@ func setup(t *testing.T) *testFixture {
 	userURNStr := "urn:sm:user:test-user-id"
 	token, err := createTestRS256Token(t, userURNStr, testKeyID, privateKey)
 	require.NoError(t, err)
-	// --- END NEW AUTH ---
 
-	// 2. Create ConnectionManager (now with real auth)
+	// 3. Create ConnectionManager
 	cm, err := NewConnectionManager(
-		"0",
-		authMiddleware, // <-- Pass in the real (mocked-server) middleware
+		"0", // Use port 0 for dynamic allocation
+		authMiddleware,
 		presenceCache,
 		messageQueue,
 		logger,
 	)
 	require.NoError(t, err, "NewConnectionManager failed")
 
-	// 3. Create a test WebSocket server
+	// 4. Create a test WebSocket server
 	wsServer := httptest.NewServer(cm.server.Handler)
 	t.Cleanup(wsServer.Close)
 
@@ -189,7 +186,7 @@ func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	// Mock the 'add' dependencies
 	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil)
 
-	// --- NEW: Add the token to the dialer ---
+	// The auth token is passed in the Sec-WebSocket-Protocol header.
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 45 * time.Second,
 		Subprotocols:     []string{fx.token}, // Send the token here
@@ -198,7 +195,6 @@ func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	wsClientConn, _, err := dialer.Dial(wsURL, nil) // Use the custom dialer
 	require.NoError(t, err, "Failed to dial test WebSocket server")
 	t.Cleanup(func() { _ = wsClientConn.Close() })
-	// --- END NEW ---
 
 	// Wait for the connection to be registered
 	require.Eventually(t, func() bool {
@@ -213,7 +209,7 @@ func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
 	fx := setup(t)
 
 	// --- 1. Test Connect ---
-	// Mock expectations for 'add' (unchanged)
+	// Mock expectations for 'add'
 	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil).Once()
 
 	// Connect the client (this now performs a real auth check)
@@ -223,8 +219,6 @@ func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
 	fx.presenceCache.AssertCalled(t, "Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo"))
 
 	// --- 2. Test Disconnect ---
-
-	// (This part is unchanged from your original test)
 	fx.wg.Add(1)
 	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
 	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
@@ -271,12 +265,13 @@ func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
 
 	fx.cm.Remove(fx.userURN)
 
-	// (Wait logic unchanged)
+	// Wait for the background Remove logic to complete
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		fx.wg.Wait()
 	}()
+
 	select {
 	case <-done:
 		// Success

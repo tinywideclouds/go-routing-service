@@ -1,12 +1,10 @@
-/*
-File: internal/queue/composite_queue_test.go
-Description: NEW FILE. Unit test for the CompositeMessageQueue.
-*/
+// --- File: internal/queue/message_queue_test.go ---
 package queue
 
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -82,10 +80,16 @@ type testFixture struct {
 	comp MessageQueue
 }
 
+// newTestLogger creates a discard logger for tests.
+func newTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func setup(t *testing.T) *testFixture {
 	hot := new(mockHotQueue)
 	cold := new(mockColdQueue)
-	comp, err := NewCompositeMessageQueue(hot, cold, slog.Default())
+	// --- FIX: Use a local, discarded logger ---
+	comp, err := NewCompositeMessageQueue(hot, cold, newTestLogger())
 	require.NoError(t, err)
 
 	return &testFixture{
@@ -221,10 +225,14 @@ func TestAcknowledge(t *testing.T) {
 
 	// Need to use Eventually because they run in parallel
 	require.Eventually(t, func() bool {
-		fx.hot.AssertCalled(t, "Acknowledge", ctx, testURN, ids)
-		fx.cold.AssertCalled(t, "Acknowledge", ctx, testURN, ids)
-		return true
+		// We can't use AssertCalled in Eventually, so we check mock.Calls
+		hotCalls := fx.hot.Mock.Calls
+		coldCalls := fx.cold.Mock.Calls
+		return len(hotCalls) > 0 && len(coldCalls) > 0
 	}, 1*time.Second, 10*time.Millisecond)
+
+	fx.hot.AssertCalled(t, "Acknowledge", ctx, testURN, ids)
+	fx.cold.AssertCalled(t, "Acknowledge", ctx, testURN, ids)
 }
 
 func TestMigrateHotToCold(t *testing.T) {

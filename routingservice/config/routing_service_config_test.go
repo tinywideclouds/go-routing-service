@@ -1,4 +1,4 @@
-// --- File: routingservice/config/config_test.go ---
+// --- File: routingservice/config/routing_service_config_test.go ---
 package config_test
 
 import (
@@ -33,7 +33,7 @@ func newBaseConfig() *config.AppConfig {
 }
 
 func TestUpdateConfigWithEnvOverrides(t *testing.T) {
-	logger := newTestLogger() // ADDED
+	logger := newTestLogger()
 	t.Run("Success - All overrides applied", func(t *testing.T) {
 		// Arrange
 		baseCfg := newBaseConfig()
@@ -47,7 +47,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 
 		// Act
 		// This is the "Stage 2" function
-		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger) // CHANGED
+		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
 		// Assert
 		require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		// Note: REDIS_ADDR is not strictly required by validation
 
 		// Act
-		cfg, err := config.UpdateConfigWithEnvOverrides(emptyCfg, logger) // CHANGED
+		cfg, err := config.UpdateConfigWithEnvOverrides(emptyCfg, logger)
 
 		// Assert
 		require.NoError(t, err)
@@ -132,6 +132,7 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		// Assert
 		assert.Error(t, err)
 		assert.Nil(t, cfg)
+
 		assert.Contains(t, err.Error(), "API_PORT is not set")
 	})
 

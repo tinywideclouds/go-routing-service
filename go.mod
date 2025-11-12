@@ -11,7 +11,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/illmade-knight/go-dataflow v0.3.7
-	github.com/illmade-knight/go-test v0.0.6
+	github.com/illmade-knight/go-test v0.0.10
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/redis/go-redis/v9 v9.14.0
 	github.com/rs/zerolog v1.34.0

@@ -1,9 +1,4 @@
-/*
-File: internal/pipeline/pipeline_test.go
-Description: REFACTORED integration test to use the new
-'secure.SecureEnvelope' and 'urn' types for testing the
-producer/transformer serialization flow.
-*/
+// --- File: internal/pipeline/pipeline_test.go ---
 package pipeline_test
 
 import (
@@ -26,7 +21,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
-	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -48,7 +42,8 @@ func TestSerializationFlow(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	client, err := pubsub.NewClient(ctx, "test-project", option.WithGRPCConn(conn))
+	// --- FIX: Create client with context.Background() ---
+	client, err := pubsub.NewClient(context.Background(), "test-project", option.WithGRPCConn(conn))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -68,7 +63,6 @@ func TestSerializationFlow(t *testing.T) {
 	topic := client.Publisher(topicID)
 	producer := psadapter.NewProducer(topic)
 
-	// REFACTORED: Create the new "dumb" envelope
 	recipientURN, err := urn.Parse("urn:sm:user:test-recipient")
 	require.NoError(t, err)
 

@@ -1,23 +1,18 @@
+// --- File: internal/platform/queue/queue_gcloud_test.go ---
 //go:build integration_gcloud
 
-/*
-File: internal/platform/queue/queue_gcloud_test.go
-Description: CORRECTED integration test. Fixes a major logical bug
-where tests were enqueuing messages for different users
-while expecting them in the same queue.
-*/
 package queue_test
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-platform/pkg/routing/v1"
@@ -57,11 +52,14 @@ func setupGCloudSuite(t *testing.T) *gcloudTestFixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
-	fsClient, err := firestore.NewClient(ctx, projectID)
+	// --- FIX: Create client with context.Background() ---
+	fsClient, err := firestore.NewClient(context.Background(), projectID)
 	require.NoError(t, err, "Failed to create real Firestore client")
 	t.Cleanup(func() { _ = fsClient.Close() })
 
-	logger := zerolog.Nop()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
 	const hotMainCollectionName = "test-hot-main"
 	const hotPendingCollectionName = "test-hot-pending"
 	const coldCollectionName = "test-cold-queue"
@@ -125,7 +123,6 @@ func deleteCollection(ctx context.Context, client *firestore.Client, ref *firest
 	}
 }
 
-// --- THIS IS THE FIX ---
 // createTestURN creates ONE unique user for a test.
 func createTestURN(t *testing.T) urn.URN {
 	t.Helper()
@@ -143,8 +140,6 @@ func createTestEnvelope(t *testing.T, recipientURN urn.URN, data string) *secure
 		EncryptedData: []byte(fmt.Sprintf("data-%s", data)),
 	}
 }
-
-// --- END FIX ---
 
 // cleanupUser is a helper to delete all data for a user from a collection.
 func cleanupUser(t *testing.T, ctx context.Context, client *firestore.Client, collectionName string, urn urn.URN) {
@@ -164,12 +159,10 @@ func TestGCloud_ColdQueue_Acknowledge(t *testing.T) {
 	fixture := setupGCloudSuite(t)
 	ctx := fixture.ctx
 
-	// --- THIS IS THE FIX ---
 	// Create ONE user. Create all messages for THAT user.
 	recipientURN := createTestURN(t)
 	msg1 := createTestEnvelope(t, recipientURN, "cold-ack-1")
 	msg2 := createTestEnvelope(t, recipientURN, "cold-ack-2")
-	// --- END FIX ---
 
 	coldCollectionRef := fixture.fsClient.Collection(fixture.coldCollectionName).Doc(recipientURN.String()).Collection("messages")
 	t.Cleanup(func() { cleanupUser(t, ctx, fixture.fsClient, fixture.coldCollectionName, recipientURN) })
@@ -274,12 +267,10 @@ func TestGCloud_HotQueue_MigrateToCold(t *testing.T) {
 
 	t.Log("INFO: This test uses the two-collection model and requires no special index.")
 
-	// --- THIS IS THE FIX ---
 	// Create ONE user. Create all messages for THAT user.
 	recipientURN := createTestURN(t)
 	msg1 := createTestEnvelope(t, recipientURN, "migrate-1")
 	msg2 := createTestEnvelope(t, recipientURN, "migrate-2")
-	// --- END FIX ---
 
 	pendingCollectionRef := fixture.fsClient.Collection(fixture.hotPendingColName).Doc(recipientURN.String()).Collection("messages")
 	t.Cleanup(func() {
@@ -296,14 +287,12 @@ func TestGCloud_HotQueue_MigrateToCold(t *testing.T) {
 
 	// Get hot doc IDs for verification
 	var hotBatch []*routing.QueuedMessage
-	// --- THIS IS THE FIX ---
 	// Wrap in Eventually to handle gcloud eventual consistency.
 	require.Eventually(t, func() bool {
 		hotBatch, err = fixture.hotQueue.RetrieveBatch(ctx, recipientURN, 2)
 		require.NoError(t, err)
 		return len(hotBatch) == 2
 	}, 30*time.Second, 1*time.Second, "Failed to retrieve seeded hot messages")
-	// --- END FIX ---
 
 	// At this point, both messages are in the PENDING collection
 	hotDocRef1 := pendingCollectionRef.Doc(hotBatch[0].ID)

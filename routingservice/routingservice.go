@@ -113,12 +113,12 @@ func newProcessingService(
 
 	// streamLogger := logger.With("component", "StreamingService") // ADDED
 	noisyZerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-	return messagepipeline.NewStreamingService[secure.SecureEnvelope](
+	return messagepipeline.NewStreamingService(
 		messagepipeline.StreamingServiceConfig{NumWorkers: cfg.NumPipelineWorkers},
 		dependencies.IngestionConsumer,
 		pipeline.EnvelopeTransformer,
 		processor,
-		noisyZerologLogger, // CHANGED (This assumes NewStreamingService accepts a slog.Logger)
+		noisyZerologLogger,
 	)
 }
 

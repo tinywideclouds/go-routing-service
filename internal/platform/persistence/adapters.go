@@ -1,8 +1,4 @@
-/*
-File: internal/platform/persistence/adapters.go
-Description: REFACTORED to use the new platform 'urn' package.
-This fixes the type mismatches for all URN-keyed fetchers.
-*/
+// --- File: internal/platform/persistence/adapters.go ---
 // Package persistence contains components for interacting with data stores.
 package persistence
 
@@ -12,17 +8,17 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
-	// REFACTORED: Use the new platform URN package
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 )
 
 // DeviceTokenDoc is the shape of the data stored in Firestore for device tokens.
 type DeviceTokenDoc struct {
-	Tokens []routing.DeviceToken `firestore:"tokens"` // Added firestore tag
+	Tokens []routing.DeviceToken `firestore:"tokens"`
 }
 
 // FirestoreTokenAdapter is a helper that wraps a generic Firestore document
 // fetcher and extracts the `Tokens` field from the returned struct.
+// It adapts a fetcher of `DeviceTokenDoc` to a fetcher of `[]routing.DeviceToken`.
 type FirestoreTokenAdapter struct {
 	DocFetcher cache.Fetcher[string, DeviceTokenDoc]
 }
@@ -43,6 +39,7 @@ func (a *FirestoreTokenAdapter) Close() error {
 
 // URNTokenFetcherAdapter is a helper that wraps a string-keyed Fetcher
 // to make it compatible with the URN-keyed Fetcher interface.
+// It adapts a fetcher of `string` keys to a fetcher of `urn.URN` keys.
 type URNTokenFetcherAdapter struct {
 	stringFetcher cache.Fetcher[string, []routing.DeviceToken]
 }
@@ -56,9 +53,8 @@ func NewURNTokenFetcherAdapter(stringFetcher cache.Fetcher[string, []routing.Dev
 }
 
 // Fetch satisfies the cache.Fetcher[urn.URN, []routing.DeviceToken] interface.
-// REFACTORED: 'key' is now the new 'urn.URN' type.
+// It converts the URN to its string representation before calling the underlying fetcher.
 func (a *URNTokenFetcherAdapter) Fetch(ctx context.Context, key urn.URN) ([]routing.DeviceToken, error) {
-	// The logic is the same: call the underlying fetcher with the string key.
 	return a.stringFetcher.Fetch(ctx, key.String())
 }
 

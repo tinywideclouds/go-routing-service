@@ -1,9 +1,9 @@
-// --- File: routingservice/config/yaml_config_test.go ---
+// --- File: routingservice/config/routing_yaml_config_test.go ---
 package config_test
 
 import (
-	"io"       // IMPORTED
-	"log/slog" // IMPORTED
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +20,7 @@ func newTestLogger() *slog.Logger {
 
 func TestNewConfigFromYaml(t *testing.T) {
 
-	logger := newTestLogger() // ADDED
+	logger := newTestLogger()
 	t.Run("Success - maps all fields correctly from YAML struct", func(t *testing.T) {
 		// Arrange
 		// This simulates the raw struct after unmarshaling the YAML file
@@ -56,7 +56,7 @@ func TestNewConfigFromYaml(t *testing.T) {
 
 		// Act
 		// This is the "Stage 1" function
-		cfg, err := config.NewConfigFromYaml(yamlCfg, logger) // CHANGED
+		cfg, err := config.NewConfigFromYaml(yamlCfg, logger)
 
 		// Assert
 		require.NoError(t, err)
@@ -75,8 +75,8 @@ func TestNewConfigFromYaml(t *testing.T) {
 		assert.Equal(t, "yaml-push-topic", cfg.PushNotificationsTopicID)
 		assert.Equal(t, 5, cfg.NumPipelineWorkers)
 		assert.Equal(t, []string{"http://yaml-origin.com"}, cfg.CorsConfig.AllowedOrigins)
-		assert.Equal(t, "yaml-role", cfg.CorsConfig.Role)
-		assert.Equal(t, "firestore", cfg.PresenceCache.Type)
+		assert.Equal(t, "yaml-role", string(cfg.CorsConfig.Role))
+		assert.Equal(t, "firestore", string(cfg.PresenceCache.Type))
 		assert.Equal(t, "yaml-presence", cfg.PresenceCache.Firestore.MainCollectionName)
 		assert.Equal(t, "redis", cfg.HotQueue.Type)
 		assert.Equal(t, "yaml-redis:6379", cfg.HotQueue.Redis.Addr)

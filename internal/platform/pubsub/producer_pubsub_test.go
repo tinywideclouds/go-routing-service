@@ -1,8 +1,4 @@
-/*
-File: internal/platform/pubsub/producer_pubsub_test.go
-Description: REFACTORED to test the producer with the
-new 'secure.SecureEnvelope' type.
-*/
+// --- File: internal/platform/pubsub/producer_pubsub_test.go ---
 package pubsub_test
 
 import (
@@ -23,11 +19,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	// REFACTORED: Use new platform packages
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 
-	// REFACTORED: Use new generated proto types
 	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 )
 
@@ -47,7 +41,8 @@ func TestProducer_Publish(t *testing.T) {
 	const subID = "test-sub"
 
 	// Create a real client connected to the in-memory server
-	client, err := pubsub.NewClient(ctx, projectID, option.WithGRPCConn(conn))
+	// --- FIX: Create client with context.Background() to prevent cleanup race ---
+	client, err := pubsub.NewClient(context.Background(), projectID, option.WithGRPCConn(conn))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -66,7 +61,6 @@ func TestProducer_Publish(t *testing.T) {
 	topic := client.Publisher(topicID)
 	producer := ps.NewProducer(topic)
 
-	// REFACTORED: Create the new "dumb" envelope
 	recipientURN, err := urn.Parse("urn:sm:user:user-bob")
 	require.NoError(t, err)
 
@@ -104,12 +98,10 @@ func TestProducer_Publish(t *testing.T) {
 
 	require.NotNil(t, receivedMsg, "Did not receive a message from the subscription")
 
-	// REFACTORED: Unmarshal into the new proto type
 	var receivedEnvelopePb securev1.SecureEnvelopePb
 	err = protojson.Unmarshal(receivedMsg.Data, &receivedEnvelopePb)
 	require.NoError(t, err)
 
-	// REFACTORED: Convert from proto using the new facade
 	receivedEnvelope, err := secure.FromProto(&receivedEnvelopePb)
 	require.NoError(t, err)
 
