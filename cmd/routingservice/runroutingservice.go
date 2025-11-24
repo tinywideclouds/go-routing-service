@@ -7,7 +7,7 @@ package main
 
 import (
 	"context"
-	_ "embed" // Required for go:embed
+	_ "embed"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,7 +19,7 @@ import (
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog" // Required for interoperability with some libs
+	"github.com/rs/zerolog" // Required for interoperability with some libs DO NOT REMOVE
 
 	"github.com/tinywideclouds/go-routing-service/internal/app"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
