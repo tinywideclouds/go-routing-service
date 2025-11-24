@@ -1,7 +1,7 @@
 /*
 File: internal/api/routing_handlers.go
-Description: Defines the HTTP handlers for the routing service API,
-including message sending, retrieval, and acknowledgment.
+Description: Defines the HTTP handlers for the routing service API.
+REFACTOR: "Handle is King" - Prioritizes Handle URN for queue operations.
 */
 package api
 
@@ -33,10 +33,9 @@ const (
 // API holds the dependencies for the stateless HTTP handlers.
 type API struct {
 	producer routing.IngestionProducer
-	// queue provides access to the persistent message queue.
-	queue  queue.MessageQueue
-	logger *slog.Logger
-	wg     sync.WaitGroup
+	queue    queue.MessageQueue
+	logger   *slog.Logger
+	wg       sync.WaitGroup
 }
 
 // NewAPI creates a new, stateless API handler.
@@ -48,20 +47,37 @@ func NewAPI(producer routing.IngestionProducer, queue queue.MessageQueue, logger
 	}
 }
 
-// Wait will block until all background tasks (like message acknowledgments) are complete.
+// Wait will block until all background tasks are complete.
 func (a *API) Wait() {
 	a.wg.Wait()
 }
 
+// resolveUserURN is the core helper for "Handle is King".
+// It checks for a Handle URN first, falling back to Identity URN only if missing.
+func (a *API) resolveUserURN(ctx context.Context) (urn.URN, error) {
+	// 1. Priority: Handle (The "Mailbox")
+	if handle, ok := middleware.GetUserHandleFromContext(ctx); ok && handle != "" {
+		return urn.Parse(handle)
+	}
+
+	// 2. Fallback: Identity (The "Passport")
+	if userID, ok := middleware.GetUserIDFromContext(ctx); ok && userID != "" {
+		return urn.Parse(userID)
+	}
+
+	return urn.URN{}, context.Canceled // Treated as Unauthorized/Missing
+}
+
 // SendHandler ingests a message and publishes it to the ingestion topic.
 func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
-	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
-	if !ok {
-		a.logger.Warn("SendHandler: No user ID in context")
+	// For sending, we just need *some* valid ID for logging/quota.
+	userURN, err := a.resolveUserURN(r.Context())
+	if err != nil {
+		a.logger.Warn("SendHandler: No user identity found in context")
 		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
 		return
 	}
-	log := a.logger.With("user", authedUserID)
+	log := a.logger.With("user", userURN.String())
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -90,20 +106,13 @@ func (a *API) SendHandler(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, http.StatusAccepted, nil)
 }
 
-// GetMessageBatchHandler implements the "pull" part of the queue for a client.
+// GetMessageBatchHandler implements the "pull" part of the queue.
 func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
-	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
-	if !ok {
-		a.logger.Warn("GetMessageBatchHandler: No user ID in context")
-		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
-		return
-	}
-
-	// The authedUserID from context is a full URN string; it must be parsed.
-	userURN, err := urn.Parse(authedUserID)
+	// REFACTOR: Use "Handle is King" resolution
+	userURN, err := a.resolveUserURN(r.Context())
 	if err != nil {
-		a.logger.Error("Failed to parse URN from authed user ID", "err", err, "user", authedUserID)
-		response.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
+		a.logger.Warn("GetMessageBatchHandler: No user identity found")
+		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
 		return
 	}
 
@@ -118,7 +127,7 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			a.logger.Warn("Invalid 'limit' parameter", "limit", limitStr)
-			response.WriteJSONError(w, http.StatusBadRequest, "invalid 'limit' parameter, must be an integer")
+			response.WriteJSONError(w, http.StatusBadRequest, "invalid 'limit' parameter")
 			return
 		}
 	}
@@ -142,20 +151,12 @@ func (a *API) GetMessageBatchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // AcknowledgeMessagesHandler implements the "ack" part of the queue.
-// It accepts a list of message IDs to be deleted.
 func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request) {
-	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
-	if !ok {
-		a.logger.Warn("AcknowledgeMessagesHandler: No user ID in context")
-		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
-		return
-	}
-
-	// The authedUserID from context is a full URN string; it must be parsed.
-	userURN, err := urn.Parse(authedUserID)
+	// REFACTOR: Use "Handle is King" resolution
+	userURN, err := a.resolveUserURN(r.Context())
 	if err != nil {
-		a.logger.Error("Failed to parse URN from authed user ID", "err", err, "user", authedUserID)
-		response.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
+		a.logger.Warn("AcknowledgeMessagesHandler: No user identity found")
+		response.WriteJSONError(w, http.StatusUnauthorized, "missing authentication token")
 		return
 	}
 
@@ -164,20 +165,20 @@ func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&ackBody); err != nil {
-		a.logger.Warn("Failed to decode ack body", "err", err, "user", authedUserID)
+		a.logger.Warn("Failed to decode ack body", "err", err, "user", userURN.String())
 		response.WriteJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
 	if len(ackBody.MessageIDs) == 0 {
-		a.logger.Debug("Ack request had no message IDs", "user", authedUserID)
+		a.logger.Debug("Ack request had no message IDs", "user", userURN.String())
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	log := a.logger.With("user", userURN.String(), "count", len(ackBody.MessageIDs))
 
-	// Acknowledgment is done in the background to return 204 to the client immediately.
+	// Acknowledgment is done in the background
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -187,7 +188,7 @@ func (a *API) AcknowledgeMessagesHandler(w http.ResponseWriter, r *http.Request)
 		log.Info("Acknowledging messages in background...")
 
 		if err := a.queue.Acknowledge(ctx, userURN, ackBody.MessageIDs); err != nil {
-			log.Error("Failed to acknowledge/delete messages in background", "err", err)
+			log.Error("Failed to acknowledge messages in background", "err", err)
 		} else {
 			log.Info("Successfully acknowledged messages in background")
 		}

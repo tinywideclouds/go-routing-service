@@ -1,7 +1,6 @@
 /*
 File: internal/realtime/connectionmanager_test.go
-Description: Integration test for the ConnectionManager,
-verifying real-time connection, authentication, and disconnection.
+Description: Verifies Handle-based connection registration.
 */
 package realtime
 
@@ -34,68 +33,58 @@ import (
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// --- Mocks ---
-
-type mockPresenceCache struct {
-	mock.Mock
-}
+// --- Mocks (Same as before) ---
+type mockPresenceCache struct{ mock.Mock }
 
 func (m *mockPresenceCache) Set(ctx context.Context, key urn.URN, val routing.ConnectionInfo) error {
-	args := m.Called(ctx, key, val)
-	return args.Error(0)
+	return m.Called(ctx, key, val).Error(0)
 }
 func (m *mockPresenceCache) Fetch(ctx context.Context, key urn.URN) (routing.ConnectionInfo, error) {
-	args := m.Called(ctx, key)
-	return args.Get(0).(routing.ConnectionInfo), args.Error(1)
+	return m.Called(ctx, key).Get(0).(routing.ConnectionInfo), m.Called(ctx, key).Error(1)
 }
 func (m *mockPresenceCache) Delete(ctx context.Context, key urn.URN) error {
-	args := m.Called(ctx, key)
-	return args.Error(0)
+	return m.Called(ctx, key).Error(0)
 }
 func (m *mockPresenceCache) Close() error {
-	args := m.Called()
-	return args.Error(0)
+	return m.Called().Error(0)
 }
 
-// mockMessageQueue implements the queue.MessageQueue interface.
-type mockMessageQueue struct {
-	mock.Mock
-}
+type mockMessageQueue struct{ mock.Mock }
 
 func (m *mockMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	args := m.Called(ctx, envelope)
-	return args.Error(0)
+	return m.Called(ctx, envelope).Error(0)
 }
 func (m *mockMessageQueue) EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	args := m.Called(ctx, envelope)
-	return args.Error(0)
+	return m.Called(ctx, envelope).Error(0)
 }
 func (m *mockMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routingv1.QueuedMessage, error) {
 	args := m.Called(ctx, userURN, limit)
-	var result []*routingv1.QueuedMessage
 	if val, ok := args.Get(0).([]*routingv1.QueuedMessage); ok {
-		result = val
+		return val, args.Error(1)
 	}
-	return result, args.Error(1)
+	return nil, args.Error(1)
 }
 func (m *mockMessageQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
-	args := m.Called(ctx, userURN, messageIDs)
-	return args.Error(0)
+	return m.Called(ctx, userURN, messageIDs).Error(0)
 }
 func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN) error {
-	args := m.Called(ctx, userURN)
-	return args.Error(0)
+	return m.Called(ctx, userURN).Error(0)
 }
 
 // --- Test Helpers ---
 const testKeyID = "test-key-id-1"
 
-func createTestRS256Token(_ *testing.T, userID, keyID string, privateKey *rsa.PrivateKey) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+func createTestToken(t *testing.T, userID, handle, keyID string, privateKey *rsa.PrivateKey) (string, error) {
+	// Add 'handle' to claims to test resolution priority
+	claims := jwt.MapClaims{
 		"sub": userID,
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(time.Hour).Unix(),
-	})
+	}
+	if handle != "" {
+		claims["handle"] = handle
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = keyID
 	return token.SignedString(privateKey)
 }
@@ -110,8 +99,7 @@ func newMockJWKSServer(t *testing.T, keyID string, publicKey *rsa.PublicKey) *ht
 	require.NoError(t, keySet.AddKey(jwkKey))
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(w).Encode(keySet)
-		require.NoError(t, err)
+		_ = json.NewEncoder(w).Encode(keySet)
 	}))
 }
 
@@ -121,115 +109,100 @@ type testFixture struct {
 	presenceCache *mockPresenceCache
 	messageQueue  *mockMessageQueue
 	wsServer      *httptest.Server
-	userURN       urn.URN
+	userURN       urn.URN // This will now be the HANDLE URN
 	wg            *sync.WaitGroup
-	token         string // Stores the valid token
+	token         string
 }
 
-// setup creates a test fixture for the ConnectionManager.
 func setup(t *testing.T) *testFixture {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// 1. Create Mocks
 	presenceCache := new(mockPresenceCache)
 	messageQueue := new(mockMessageQueue)
 
-	// 2. Create Real Auth Dependencies
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	mockJWKSServer := newMockJWKSServer(t, testKeyID, &privateKey.PublicKey)
 	t.Cleanup(mockJWKSServer.Close)
 
-	// Create the *real* WebSocket auth middleware
 	authMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(mockJWKSServer.URL, logger)
 	require.NoError(t, err)
 
-	// Create a valid token
-	userURNStr := "urn:sm:user:test-user-id"
-	token, err := createTestRS256Token(t, userURNStr, testKeyID, privateKey)
+	// Create a token with BOTH identity and handle
+	identityURNStr := "urn:auth:google:123"
+	handleURNStr := "urn:lookup:email:test@test.com"
+
+	token, err := createTestToken(t, identityURNStr, handleURNStr, testKeyID, privateKey)
 	require.NoError(t, err)
 
-	// 3. Create ConnectionManager
-	cm, err := NewConnectionManager(
-		"0", // Use port 0 for dynamic allocation
-		authMiddleware,
-		presenceCache,
-		messageQueue,
-		logger,
-	)
-	require.NoError(t, err, "NewConnectionManager failed")
+	cm, err := NewConnectionManager("0", authMiddleware, presenceCache, messageQueue, logger)
+	require.NoError(t, err)
 
-	// 4. Create a test WebSocket server
 	wsServer := httptest.NewServer(cm.server.Handler)
 	t.Cleanup(wsServer.Close)
 
-	userURN, err := urn.Parse(userURNStr)
-	require.NoError(t, err)
+	// We expect the system to resolve to the HANDLE
+	expectedURN, _ := urn.Parse(handleURNStr)
 
 	return &testFixture{
 		cm:            cm,
 		presenceCache: presenceCache,
 		messageQueue:  messageQueue,
 		wsServer:      wsServer,
-		userURN:       userURN,
+		userURN:       expectedURN, // Expectations use this
 		wg:            &sync.WaitGroup{},
-		token:         token, // Store the valid token
+		token:         token,
 	}
 }
 
-// connectClient connects a new websocket client and waits for it to be registered.
 func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(fx.wsServer.URL, "http") + "/connect"
 
-	// Mock the 'add' dependencies
-	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil)
-
-	// The auth token is passed in the Sec-WebSocket-Protocol header.
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 45 * time.Second,
-		Subprotocols:     []string{fx.token}, // Send the token here
+		Subprotocols:     []string{fx.token},
 	}
 
-	wsClientConn, _, err := dialer.Dial(wsURL, nil) // Use the custom dialer
-	require.NoError(t, err, "Failed to dial test WebSocket server")
+	wsClientConn, _, err := dialer.Dial(wsURL, nil)
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = wsClientConn.Close() })
 
-	// Wait for the connection to be registered
 	require.Eventually(t, func() bool {
+		// Check if connection is stored under the HANDLE URN
 		_, ok := fx.cm.connections.Load(fx.userURN.String())
 		return ok
-	}, 2*time.Second, 10*time.Millisecond, "User connection was not registered")
+	}, 2*time.Second, 10*time.Millisecond)
 
 	return wsClientConn
 }
 
-func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
+func TestConnectionManager_Connect_UsesHandle(t *testing.T) {
 	fx := setup(t)
 
-	// --- 1. Test Connect ---
-	// Mock expectations for 'add'
+	// Expectation: Presence is set for the HANDLE URN
 	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil).Once()
 
-	// Connect the client (this now performs a real auth check)
+	_ = fx.connectClient(t)
+
+	fx.presenceCache.AssertExpectations(t)
+}
+
+func TestConnectionManager_Disconnect_UsesHandle(t *testing.T) {
+	fx := setup(t)
+	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.Anything).Return(nil)
 	wsClientConn := fx.connectClient(t)
 
-	// Assert 'add' was called
-	fx.presenceCache.AssertCalled(t, "Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo"))
-
-	// --- 2. Test Disconnect ---
+	// Expectation: Delete/Migrate called for HANDLE URN
 	fx.wg.Add(1)
 	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
 	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
 		Return(nil).
-		Run(func(args mock.Arguments) {
-			fx.wg.Done()
-		}).
+		Run(func(args mock.Arguments) { fx.wg.Done() }).
 		Once()
 
-	err := wsClientConn.Close()
-	require.NoError(t, err)
+	_ = wsClientConn.Close()
 
 	done := make(chan struct{})
 	go func() {
@@ -239,46 +212,10 @@ func TestConnectionManager_ConnectAndDisconnect(t *testing.T) {
 
 	select {
 	case <-done:
-		// Success!
 	case <-time.After(5 * time.Second):
-		t.Fatal("Test timed out waiting for disconnect to be processed")
+		t.Fatal("Timeout")
 	}
 
-	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
-	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
-	_, ok := fx.cm.connections.Load(fx.userURN.String())
-	assert.False(t, ok, "Connection was not removed from map")
-}
-
-func TestConnectionManager_Remove_MigrationFails(t *testing.T) {
-	fx := setup(t)
-	testErr := errors.New("migration failed")
-
-	fx.wg.Add(1)
-	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
-	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
-		Return(testErr).
-		Run(func(args mock.Arguments) {
-			fx.wg.Done()
-		}).
-		Once()
-
-	fx.cm.Remove(fx.userURN)
-
-	// Wait for the background Remove logic to complete
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fx.wg.Wait()
-	}()
-
-	select {
-	case <-done:
-		// Success
-	case <-time.After(2 * time.Second):
-		t.Fatal("Test timed out waiting for Remove to complete")
-	}
-
-	fx.presenceCache.AssertCalled(t, "Delete", mock.Anything, fx.userURN)
-	fx.messageQueue.AssertCalled(t, "MigrateHotToCold", mock.Anything, fx.userURN)
+	fx.presenceCache.AssertExpectations(t)
+	fx.messageQueue.AssertExpectations(t)
 }

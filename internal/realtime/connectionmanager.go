@@ -1,9 +1,7 @@
 /*
 File: internal/realtime/connectionmanager.go
-Description: Manages WebSocket connections, user presence,
-and the lifecycle of real-time clients.
+Description: Manages WebSocket connections with "Handle is King" resolution.
 */
-// Package realtime provides components for managing real-time client connections.
 package realtime
 
 import (
@@ -36,14 +34,14 @@ type ConnectionManager struct {
 	connections   sync.Map // map[string]*websocket.Conn
 	logger        *slog.Logger
 	instanceID    string
-	listener      net.Listener // Manages the port for dynamic port allocation
-	port          string       // The configured port
+	listener      net.Listener
+	port          string
 }
 
 // NewConnectionManager creates and wires up a new WebSocket connection manager.
 func NewConnectionManager(
 	port string,
-	authMiddleware func(http.Handler) http.Handler, // Accepts auth middleware
+	authMiddleware func(http.Handler) http.Handler,
 	presenceCache cache.PresenceCache[urn.URN, routing.ConnectionInfo],
 	messageQueue queue.MessageQueue,
 	logger *slog.Logger,
@@ -66,11 +64,10 @@ func NewConnectionManager(
 		connections:   sync.Map{},
 		logger:        cmLogger,
 		instanceID:    instanceID,
-		port:          port, // Store the configured port
+		port:          port,
 	}
 
 	mux := http.NewServeMux()
-	// The /connect endpoint is protected by the injected auth middleware.
 	mux.Handle("/connect", authMiddleware(http.HandlerFunc(cm.connectHandler)))
 	cm.server = &http.Server{
 		Handler: mux,
@@ -86,19 +83,14 @@ func (cm *ConnectionManager) Start(ctx context.Context) error {
 		addr = ":" + addr
 	}
 
-	// 1. Create the listener
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		cm.logger.Error("WebSocket server failed to listen", "addr", addr, "err", err)
 		return fmt.Errorf("websocket server failed to listen: %w", err)
 	}
-	// 2. Store the listener so GetHTTPPort can read the dynamically assigned port
 	cm.listener = listener
-
-	// 3. Log the *actual* port
 	cm.logger.Info("WebSocket server starting...", "addr", cm.listener.Addr().String())
 
-	// 4. Call Serve on the listener
 	if err := cm.server.Serve(cm.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		cm.logger.Error("WebSocket server failed", "err", err)
 		return fmt.Errorf("websocket server failed: %w", err)
@@ -112,13 +104,11 @@ func (cm *ConnectionManager) Shutdown(ctx context.Context) error {
 	cm.logger.Info("Shutting down WebSocket service...")
 	var finalErr error
 
-	// 1. Shut down the HTTP server
 	if err := cm.server.Shutdown(ctx); err != nil {
 		cm.logger.Error("WebSocket server shutdown failed", "err", err)
 		finalErr = err
 	}
 
-	// 2. Close the underlying listener
 	if cm.listener != nil {
 		if err := cm.listener.Close(); err != nil {
 			cm.logger.Error("WebSocket listener close failed", "err", err)
@@ -130,90 +120,73 @@ func (cm *ConnectionManager) Shutdown(ctx context.Context) error {
 	return finalErr
 }
 
-// GetHTTPPort returns the port the server is listening on (e.g., ":8080").
-// Returns ":0" if the listener is not yet active.
+// GetHTTPPort returns the port the server is listening on.
 func (cm *ConnectionManager) GetHTTPPort() string {
 	if cm.listener == nil {
-		return ":0" // Not started yet
+		return ":0"
 	}
 	addr := cm.listener.Addr().String()
 	port := strings.LastIndex(addr, ":")
 	if port == -1 {
-		return ":0" // Should not happen
+		return ":0"
 	}
-	// Return in the same ":port" format
 	return addr[port:]
 }
 
-// connectHandler upgrades a new HTTP request to a WebSocket and manages its lifecycle.
-// This handler assumes authentication has already been verified by middleware.
+// connectHandler upgrades a new HTTP request to a WebSocket.
 func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Request) {
-	// The auth middleware has already run and populated the context.
-	authedUserID, ok := middleware.GetUserIDFromContext(r.Context())
-	if !ok {
-		// This is a failsafe, but should be caught by middleware.
-		cm.logger.Error("connectHandler reached without user ID in context. Auth middleware may be misconfigured.")
-		http.Error(w, "Unauthorized: Auth middleware failed to set user context.", http.StatusUnauthorized)
+	// REFACTOR: Use "Handle is King" resolution for WebSockets too.
+	var userURN urn.URN
+	var parseErr error
+
+	if handle, ok := middleware.GetUserHandleFromContext(r.Context()); ok && handle != "" {
+		userURN, parseErr = urn.Parse(handle)
+	} else if userID, ok := middleware.GetUserIDFromContext(r.Context()); ok && userID != "" {
+		userURN, parseErr = urn.Parse(userID)
+	} else {
+		cm.logger.Error("connectHandler: No identity found in context")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	userURN, err := urn.Parse(authedUserID)
-	if err != nil {
-		cm.logger.Error("Failed to parse user URN from authenticated context", "err", err, "user_id", authedUserID)
-		http.Error(w, "Internal Server Error: Could not parse user URN", http.StatusInternalServerError)
+
+	if parseErr != nil {
+		cm.logger.Error("Failed to parse user URN", "err", parseErr)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
 	log := cm.logger.With("user", userURN.String())
 
-	// --- WebSocket Auth Handshake ---
-	// The JWT is passed via the 'Sec-WebSocket-Protocol' header.
-	// We must read this header and pass it *back* to the upgrader
-	// to complete the handshake. The auth middleware has already validated it.
+	// WebSocket Auth Handshake
 	protocol := r.Header.Get("Sec-WebSocket-Protocol")
 	headers := http.Header{}
 	if protocol != "" {
-		log.Debug("Passing Sec-WebSocket-Protocol to upgrader")
 		headers.Set("Sec-WebSocket-Protocol", protocol)
-	} else {
-		// This should have been caught by auth, but we log it just in case.
-		log.Warn("connectHandler reached without Sec-WebSocket-Protocol header. Auth middleware may be misconfigured.")
 	}
 
-	conn, err := cm.upgrader.Upgrade(w, r, headers) // Pass headers to complete handshake
+	conn, err := cm.upgrader.Upgrade(w, r, headers)
 	if err != nil {
 		log.Error("Failed to upgrade connection", "err", err)
 		return
 	}
-	// --- End Handshake ---
 
 	defer func() {
-		err = conn.Close()
-		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Warn("Error closing connection", "err", err)
-			}
-		}
+		conn.Close()
 	}()
 
+	// Register using the Resolved URN (Handle)
 	cm.add(userURN, conn)
-	defer cm.Remove(userURN) // This now triggers migration
+	defer cm.Remove(userURN)
 
 	log.Info("User connected via WebSocket.")
 
-	// Read loop (to detect client disconnect)
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Debug("WebSocket closed normally")
-			} else {
-				log.Warn("WebSocket read error", "err", err)
-			}
 			break
 		}
 	}
 }
 
-// add registers a new connection and sets the user's presence.
 func (cm *ConnectionManager) add(userURN urn.URN, conn *websocket.Conn) {
 	log := cm.logger.With("user", userURN.String())
 	cm.connections.Store(userURN.String(), conn)
@@ -229,18 +202,15 @@ func (cm *ConnectionManager) add(userURN urn.URN, conn *websocket.Conn) {
 	}
 }
 
-// Remove unregisters a connection, deletes presence, and triggers queue migration.
 func (cm *ConnectionManager) Remove(userURN urn.URN) {
 	log := cm.logger.With("user", userURN.String())
 	cm.connections.Delete(userURN.String())
 
-	// 1. Delete presence
 	log.Debug("Deleting user presence from cache")
 	if err := cm.presenceCache.Delete(context.Background(), userURN); err != nil {
 		log.Error("Failed to delete user presence from cache", "err", err)
 	}
 
-	// 2. Trigger hot-to-cold migration for this user
 	log.Info("User disconnected. Triggering hot-to-cold queue migration.")
 	migrationCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -248,6 +218,5 @@ func (cm *ConnectionManager) Remove(userURN urn.URN) {
 	if err := cm.messageQueue.MigrateHotToCold(migrationCtx, userURN); err != nil {
 		log.Error("CRITICAL: Hot-to-cold migration failed", "err", err)
 	}
-
 	log.Info("User disconnected.")
 }
