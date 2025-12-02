@@ -45,6 +45,13 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 			return nil
 		}
 
+		// If the user is offline and the message is ephemeral (e.g., typing indicator),
+		// we drop it immediately. We do NOT store it, and we do NOT send a push.
+		if envelope.IsEphemeral {
+			procLogger.Info("User is offline and message is ephemeral. Dropping message.")
+			return nil
+		}
+
 		// --- COLD PATH ---
 		// 2. User is offline. Fetch their device tokens for push notifications.
 		procLogger.Info("User is offline. Checking for push notification tokens.")

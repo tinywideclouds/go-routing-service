@@ -167,8 +167,8 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 	t.Cleanup(func() { _ = fsClient.Close() })
 
 	// --- 2. Arrange service dependencies ---
-	senderURN, _ := urn.Parse("urn:sm:user:user-alice")
-	recipientURN, _ := urn.Parse("urn:sm:user:user-bob")
+	senderURN, _ := urn.Parse("urn:contacts:user:user-alice")
+	recipientURN, _ := urn.Parse("urn:contacts:user:user-bob")
 
 	senderToken := createTestRS256Token(t, privateKey, senderURN.EntityID())
 	recipientToken := createTestRS256Token(t, privateKey, recipientURN.EntityID())

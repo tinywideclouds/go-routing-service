@@ -35,7 +35,7 @@ func (m *mockEventProducer) Publish(ctx context.Context, data messagepipeline.Me
 func TestNotifyOffline(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
-	testURN, _ := urn.Parse("urn:sm:user:test-user")
+	testURN, _ := urn.Parse("urn:contacts:user:test-user")
 
 	testEnvelope := &secure.SecureEnvelope{
 		RecipientID:   testURN,
@@ -135,7 +135,7 @@ func TestNotifyOffline(t *testing.T) {
 func TestPokeOnline(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
-	testURN, _ := urn.Parse("urn:sm:user:test-user")
+	testURN, _ := urn.Parse("urn:contacts:user:test-user")
 
 	t.Run("Success - Publishes a 'poke' payload", func(t *testing.T) {
 		// Arrange

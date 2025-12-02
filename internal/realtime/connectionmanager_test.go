@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,7 +21,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	"github.com/lestrrat-go/jwx/v2/jwk"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
@@ -74,7 +72,7 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 // --- Test Helpers ---
 const testKeyID = "test-key-id-1"
 
-func createTestToken(t *testing.T, userID, handle, keyID string, privateKey *rsa.PrivateKey) (string, error) {
+func createTestToken(_ *testing.T, userID, handle, keyID string, privateKey *rsa.PrivateKey) (string, error) {
 	// Add 'handle' to claims to test resolution priority
 	claims := jwt.MapClaims{
 		"sub": userID,

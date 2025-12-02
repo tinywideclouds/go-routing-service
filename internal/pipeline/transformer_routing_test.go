@@ -12,7 +12,7 @@ import (
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -20,7 +20,7 @@ func TestEnvelopeTransformer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 
-	recipientURN, err := urn.Parse("urn:sm:user:user-bob")
+	recipientURN, err := urn.Parse("urn:contacts:user:user-bob")
 	require.NoError(t, err)
 
 	validEnvelope := secure.SecureEnvelope{
@@ -33,7 +33,7 @@ func TestEnvelopeTransformer(t *testing.T) {
 
 	// This payload will correctly fail the "entity type must not be empty"
 	// check in urn.Parse() when secure.FromProto() is called.
-	invalidPayload := []byte(`{"recipientId": "urn:sm::invalid-id"}`)
+	invalidPayload := []byte(`{"recipientId": "urn:message::invalid-id"}`)
 
 	testCases := []struct {
 		name                  string

@@ -112,7 +112,7 @@ func TestEmulator_RedisRetrieveAndAck(t *testing.T) {
 	fixture := setupEmulatorSuite(t)
 	ctx := fixture.ctx // Use the timed test context from the fixture
 
-	recipientURN, _ := urn.Parse("urn:sm:user:redis-user-1")
+	recipientURN, _ := urn.Parse("urn:contacts:user:redis-user-1")
 	queueKey := "queue:" + recipientURN.String()
 	pendingKey := "pending:" + recipientURN.String()
 
@@ -167,7 +167,7 @@ func TestEmulator_RedisMigrateToCold(t *testing.T) {
 	fixture := setupEmulatorSuite(t)
 	ctx := fixture.ctx // Use the timed test context from the fixture
 
-	recipientURN, _ := urn.Parse("urn:sm:user:redis-migrate-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:redis-migrate-user")
 	queueKey := "queue:" + recipientURN.String()
 	pendingKey := "pending:" + recipientURN.String()
 	coldCollectionRef := fixture.fsClient.Collection(fixture.coldCollectionName).Doc(recipientURN.String()).Collection("messages")

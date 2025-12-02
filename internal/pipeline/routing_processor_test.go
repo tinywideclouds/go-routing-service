@@ -112,7 +112,7 @@ func (m *mockPushNotifier) PokeOnline(ctx context.Context, recipient urn.URN) er
 var (
 	nopLogger    = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	testConfig   = &config.AppConfig{}
-	testURN, _   = urn.Parse("urn:sm:user:test-user")
+	testURN, _   = urn.Parse("urn:contacts:user:test-user")
 	testEnvelope = &secure.SecureEnvelope{
 		RecipientID:   testURN,
 		EncryptedData: []byte("test"),

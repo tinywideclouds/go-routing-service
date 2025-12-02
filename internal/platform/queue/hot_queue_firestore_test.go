@@ -96,7 +96,7 @@ func TestHotEnqueueRetrieveAcknowledge(t *testing.T) {
 	fixture := setupHotSuite(t)
 	ctx := fixture.ctx // Use the timed test context from the fixture
 
-	recipientURN, _ := urn.Parse("urn:sm:user:hot-queue-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:hot-queue-user")
 	mainCollectionRef := fixture.fsClient.Collection(fixture.mainCollectionName).Doc(recipientURN.String()).Collection("messages")
 	pendingCollectionRef := fixture.fsClient.Collection(fixture.pendingCollectionName).Doc(recipientURN.String()).Collection("messages")
 
@@ -165,7 +165,7 @@ func TestMigrateToCold(t *testing.T) {
 	fixture := setupHotSuite(t)
 	ctx := fixture.ctx // Use the timed test context from the fixture
 
-	recipientURN, _ := urn.Parse("urn:sm:user:hot-migrate-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:hot-migrate-user")
 	mainCollectionRef := fixture.fsClient.Collection(fixture.mainCollectionName).Doc(recipientURN.String()).Collection("messages")
 	pendingCollectionRef := fixture.fsClient.Collection(fixture.pendingCollectionName).Doc(recipientURN.String()).Collection("messages")
 

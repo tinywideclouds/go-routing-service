@@ -68,7 +68,7 @@ func (m *mockColdQueue) Acknowledge(ctx context.Context, userURN urn.URN, messag
 // --- Fixture ---
 
 var (
-	testURN, _ = urn.Parse("urn:sm:user:test")
+	testURN, _ = urn.Parse("urn:contacts:user:test")
 	testEnv    = &secure.SecureEnvelope{RecipientID: testURN}
 	testMsg    = &routing.QueuedMessage{ID: "msg-1", Envelope: testEnv}
 	testErr    = errors.New("queue error")

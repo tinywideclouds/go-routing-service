@@ -85,7 +85,7 @@ func setupRedisSuite(t *testing.T) (context.Context, *redisTestFixture) {
 func TestRedisHotEnqueueRetrieveAcknowledge(t *testing.T) {
 	ctx, fixture := setupRedisSuite(t) // ctx is the timed testCtx
 
-	recipientURN, _ := urn.Parse("urn:sm:user:redis-user-1")
+	recipientURN, _ := urn.Parse("urn:contacts:user:redis-user-1")
 	queueKey := "queue:" + recipientURN.String()
 	pendingKey := "pending:" + recipientURN.String()
 
@@ -159,7 +159,7 @@ func TestRedisHotEnqueueRetrieveAcknowledge(t *testing.T) {
 func TestRedisMigrateToCold(t *testing.T) {
 	ctx, fixture := setupRedisSuite(t) // ctx is the timed testCtx
 
-	recipientURN, _ := urn.Parse("urn:sm:user:redis-migrate-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:redis-migrate-user")
 	queueKey := "queue:" + recipientURN.String()
 	pendingKey := "pending:" + recipientURN.String()
 

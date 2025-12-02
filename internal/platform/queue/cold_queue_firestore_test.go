@@ -88,7 +88,7 @@ type storedMessageForTest struct {
 func TestEnqueue(t *testing.T) {
 	ctx, fixture := setupSuite(t) // ctx is now the timed testCtx
 
-	recipientURN, _ := urn.Parse("urn:sm:user:store-test-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:store-test-user")
 	collectionRef := fixture.fsClient.Collection(fixture.collectionName).Doc(recipientURN.String()).Collection("messages")
 
 	msg1 := baseEnvelope(recipientURN, "1")
@@ -127,7 +127,7 @@ func TestEnqueue(t *testing.T) {
 func TestRetrieveBatch(t *testing.T) {
 	ctx, fixture := setupSuite(t) // ctx is the timed testCtx
 
-	recipientURN, _ := urn.Parse("urn:sm:user:batch-test-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:batch-test-user")
 	collectionRef := fixture.fsClient.Collection(fixture.collectionName).Doc(recipientURN.String()).Collection("messages")
 
 	// --- 1. Seed Data ---
@@ -189,7 +189,7 @@ func TestRetrieveBatch(t *testing.T) {
 func TestAcknowledge(t *testing.T) {
 	ctx, fixture := setupSuite(t) // ctx is the timed testCtx
 
-	recipientURN, _ := urn.Parse("urn:sm:user:ack-test-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:ack-test-user")
 	collectionRef := fixture.fsClient.Collection(fixture.collectionName).Doc(recipientURN.String()).Collection("messages")
 
 	// --- (Seeding logic is unchanged) ---

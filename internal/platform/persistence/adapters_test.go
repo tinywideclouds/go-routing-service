@@ -80,8 +80,8 @@ func TestURNTokenFetcherAdapter(t *testing.T) {
 	ctx := context.Background()
 	testTokens := []routing.DeviceToken{{Token: "test-token"}}
 	testErr := errors.New("not found")
-	testURN, _ := urn.Parse("urn:sm:user:test-user")
-	testKey := "urn:sm:user:test-user"
+	testURN, _ := urn.Parse("urn:contacts:user:test-user")
+	testKey := "urn:contacts:user:test-user"
 
 	t.Run("Success", func(t *testing.T) {
 		// Arrange

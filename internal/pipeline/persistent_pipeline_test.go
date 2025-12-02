@@ -30,7 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
 	"github.com/tinywideclouds/go-routing-service/internal/queue"
@@ -99,8 +98,8 @@ func (m *mockPPushNotifier) PokeOnline(ctx context.Context, urn urn.URN) error {
 
 // storedMessageForTest is the struct *actually* stored by FirestoreColdQueue
 type storedMessageForTest struct {
-	QueuedAt time.Time                  `firestore:"queued_at"`
-	Envelope *securev1.SecureEnvelopePb `firestore:"envelope"`
+	QueuedAt time.Time              `firestore:"queued_at"`
+	Envelope *secure.SecureEnvelope `firestore:"envelope"`
 }
 
 // TestPersistentPipeline_Integration validates the full "offline" path.
@@ -174,7 +173,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// 5. Arrange: Create test data publisher
-	recipientURN, _ := urn.Parse("urn:sm:user:test-offline-user")
+	recipientURN, _ := urn.Parse("urn:contacts:user:test-offline-user")
 	originalEnvelope := &secure.SecureEnvelope{
 		RecipientID:   recipientURN,
 		EncryptedData: []byte(uuid.NewString()), // Unique payload
@@ -248,10 +247,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	err = docs[0].DataTo(&storedData)
 	require.NoError(t, err)
 
-	storedEnvelope, err := secure.FromProto(storedData.Envelope)
-	require.NoError(t, err)
-
-	assert.Equal(t, originalEnvelope.EncryptedData, storedEnvelope.EncryptedData, "EncryptedData was corrupted in the pipeline")
+	assert.Equal(t, originalEnvelope.EncryptedData, storedData.Envelope.EncryptedData, "EncryptedData was corrupted in the pipeline")
 	assert.WithinDuration(t, time.Now(), storedData.QueuedAt, 15*time.Second, "QueuedAt timestamp was not set")
 	t.Log("✅ Pipeline integration test passed. Data integrity verified.")
 }

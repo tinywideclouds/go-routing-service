@@ -63,7 +63,7 @@ func TestSerializationFlow(t *testing.T) {
 	topic := client.Publisher(topicID)
 	producer := psadapter.NewProducer(topic)
 
-	recipientURN, err := urn.Parse("urn:sm:user:test-recipient")
+	recipientURN, err := urn.Parse("urn:contacts:user:test-recipient")
 	require.NoError(t, err)
 
 	originalEnvelope := &secure.SecureEnvelope{

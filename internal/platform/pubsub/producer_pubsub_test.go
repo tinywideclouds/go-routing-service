@@ -21,8 +21,6 @@ import (
 
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
-
-	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 )
 
 func TestProducer_Publish(t *testing.T) {
@@ -61,7 +59,7 @@ func TestProducer_Publish(t *testing.T) {
 	topic := client.Publisher(topicID)
 	producer := ps.NewProducer(topic)
 
-	recipientURN, err := urn.Parse("urn:sm:user:user-bob")
+	recipientURN, err := urn.Parse("urn:contacts:user:user-bob")
 	require.NoError(t, err)
 
 	testEnvelope := &secure.SecureEnvelope{
@@ -98,7 +96,7 @@ func TestProducer_Publish(t *testing.T) {
 
 	require.NotNil(t, receivedMsg, "Did not receive a message from the subscription")
 
-	var receivedEnvelopePb securev1.SecureEnvelopePb
+	var receivedEnvelopePb secure.SecureEnvelopePb
 	err = protojson.Unmarshal(receivedMsg.Data, &receivedEnvelopePb)
 	require.NoError(t, err)
 

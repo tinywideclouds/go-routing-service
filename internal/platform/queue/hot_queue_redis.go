@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"github.com/tinywideclouds/go-routing-service/internal/queue" // Import new interfaces
+	"github.com/tinywideclouds/go-routing-service/internal/queue"
 
 	// Platform packages
 	"github.com/tinywideclouds/go-platform/pkg/net/v1"

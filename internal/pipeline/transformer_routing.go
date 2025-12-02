@@ -9,7 +9,6 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	securev1 "github.com/tinywideclouds/gen-platform/go/types/secure/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
@@ -23,7 +22,7 @@ import (
 //
 // If either step fails, the message is marked for skipping (and NACK'ing).
 func EnvelopeTransformer(_ context.Context, msg *messagepipeline.Message) (*secure.SecureEnvelope, bool, error) {
-	envelopePB := &securev1.SecureEnvelopePb{}
+	envelopePB := &secure.SecureEnvelopePb{}
 
 	err := protojson.Unmarshal(msg.Payload, envelopePB)
 	if err != nil {
