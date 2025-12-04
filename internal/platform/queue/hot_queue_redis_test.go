@@ -209,3 +209,68 @@ func TestRedisMigrateToCold(t *testing.T) {
 	assert.True(t, data1, "Pending message was not migrated")
 	assert.True(t, data2, "Queued message was not migrated")
 }
+
+// TestRedisMigrateToCold_EphemeralDrops verifies that ephemeral messages
+// are deleted from Redis but NOT written to the cold queue during migration.
+func TestRedisMigrateToCold_EphemeralDrops(t *testing.T) {
+	ctx, fixture := setupRedisSuite(t) // ctx is the timed testCtx
+
+	recipientURN, _ := urn.Parse("urn:contacts:user:redis-ephemeral-user")
+	queueKey := "queue:" + recipientURN.String()
+	pendingKey := "pending:" + recipientURN.String()
+
+	// 1. Prepare Messages
+	msgPersistent1 := baseEnvelope(recipientURN, "persistent-1")
+	msgPersistent2 := baseEnvelope(recipientURN, "persistent-2")
+	msgEphemeral := baseEnvelope(recipientURN, "ephemeral-1")
+	msgEphemeral.IsEphemeral = true // FLAG SET
+
+	// 2. Seed Queues
+	// Put Persistent 1 in PENDING (retrieve it)
+	err := fixture.hotQueue.Enqueue(ctx, msgPersistent1)
+	require.NoError(t, err)
+	_, err = fixture.hotQueue.RetrieveBatch(ctx, recipientURN, 1)
+	require.NoError(t, err)
+
+	// Put Persistent 2 and Ephemeral in MAIN QUEUE
+	err = fixture.hotQueue.Enqueue(ctx, msgPersistent2)
+	require.NoError(t, err)
+	err = fixture.hotQueue.Enqueue(ctx, msgEphemeral)
+	require.NoError(t, err)
+
+	// Assert initial state
+	qLen, _ := fixture.rdb.LLen(ctx, queueKey).Result()
+	assert.Equal(t, int64(2), qLen) // 2 in queue
+	pLen, _ := fixture.rdb.LLen(ctx, pendingKey).Result()
+	assert.Equal(t, int64(1), pLen) // 1 in pending
+
+	// 3. Act: Migrate
+	err = fixture.hotQueue.MigrateToCold(ctx, recipientURN, fixture.coldQueue)
+	require.NoError(t, err)
+
+	// 4. Assert Hot Queues are Empty (Everything cleaned up)
+	qLen, _ = fixture.rdb.LLen(ctx, queueKey).Result()
+	assert.Equal(t, int64(0), qLen)
+	pLen, _ = fixture.rdb.LLen(ctx, pendingKey).Result()
+	assert.Equal(t, int64(0), pLen)
+
+	// 5. Assert Cold Queue (mock) has ONLY Persistent messages
+	mockCold := fixture.coldQueue.(*mockColdQueue)
+	require.Len(t, mockCold.enqueued, 2)
+
+	var dataP1, dataP2, dataE bool
+	for _, env := range mockCold.enqueued {
+		if string(env.EncryptedData) == "data-persistent-1" {
+			dataP1 = true
+		}
+		if string(env.EncryptedData) == "data-persistent-2" {
+			dataP2 = true
+		}
+		if string(env.EncryptedData) == "data-ephemeral-1" {
+			dataE = true
+		}
+	}
+	assert.True(t, dataP1, "Persistent message 1 missing from cold queue")
+	assert.True(t, dataP2, "Persistent message 2 missing from cold queue")
+	assert.False(t, dataE, "Ephemeral message was incorrectly migrated to cold queue")
+}

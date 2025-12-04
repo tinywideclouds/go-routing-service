@@ -8,8 +8,10 @@ package main
 import (
 	"context"
 	_ "embed"
+	"flag" // <--- 1. Import flag
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
 	"cloud.google.com/go/firestore"
@@ -43,7 +45,21 @@ import (
 var configFile []byte
 
 func main() {
-	// --- 1. Setup structured logging (slog) ---
+	// --- 1. Define Flags ---
+	apiFlag := flag.Bool("api", false, "Start the API Service")
+	wsFlag := flag.Bool("ws", false, "Start the WebSocket Service")
+	flag.Parse()
+
+	runAPI := *apiFlag
+	runWS := *wsFlag
+
+	// If neither flag is set, default to RUNNING EVERYTHING (Local Dev Mode)
+	if !runAPI && !runWS {
+		runAPI = true
+		runWS = true
+	}
+
+	// --- 2. Setup structured logging (slog) ---
 	var logLevel slog.Level
 	switch os.Getenv("LOG_LEVEL") {
 	case "debug", "DEBUG":
@@ -64,7 +80,9 @@ func main() {
 
 	slog.SetDefault(logger)
 
-	// --- 2. Load Configuration (Stage 0: Unmarshal) ---
+	logger.Info("Service startup initialized", "run_api", runAPI, "run_ws", runWS)
+
+	// --- 3. Load Configuration (Stage 0: Unmarshal) ---
 	var yamlCfg config.YamlConfig
 	err := yaml.Unmarshal(configFile, &yamlCfg)
 	if err != nil {
@@ -72,17 +90,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- 3. Build Base Config (Stage 1: YAML to Base Struct) ---
+	// --- 4. Build Base Config (Stage 1: YAML to Base Struct) ---
 	baseCfg, err := config.NewConfigFromYaml(&yamlCfg, logger)
 	if err != nil {
 		logger.Error("Failed to build base configuration from YAML", "err", err)
 		os.Exit(1)
 	}
 
-	// --- 4. Apply Overrides & Validate (Stage 2: Env Vars) ---
+	// --- 5. Apply Overrides & Validate (Stage 2: Env Vars) ---
 	cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 	if err != nil {
 		logger.Error("Failed to finalize configuration with environment overrides", "err", err)
+		os.Exit(1)
+	}
+
+	// --- 5.5. Smart Port Detection (Cloud Run Compatibility) ---
+	// If the PORT environment variable is set (Cloud Run), automatically assign it
+	// to the active service.
+	if port := os.Getenv("PORT"); port != "" {
+		if runAPI {
+			cfg.APIPort = port
+			logger.Info("Cloud Run environment detected: Overriding API_PORT", "port", port)
+		} else if runWS {
+			// Only override WS port if API is NOT running (or if logic allows)
+			// In split mode, this logic holds: runAPI is false, so we set WS port.
+			cfg.WebSocketPort = port
+			logger.Info("Cloud Run environment detected: Overriding WEBSOCKET_PORT", "port", port)
+		}
+	}
+
+	// Late Validation: Ensure the active service has a port
+	if runAPI && cfg.APIPort == "" {
+		logger.Error("Startup failed: API_PORT is not set")
+		os.Exit(1)
+	}
+	if runWS && cfg.WebSocketPort == "" {
+		logger.Error("Startup failed: WEBSOCKET_PORT is not set")
 		os.Exit(1)
 	}
 
@@ -91,7 +134,7 @@ func main() {
 	cfg.IngressSubscriptionID = convertPubsub(cfg.ProjectID, cfg.IngressSubscriptionID, Sub)
 	cfg.IngressTopicDLQID = convertPubsub(cfg.ProjectID, cfg.IngressTopicDLQID, Pub)
 
-	// --- 5. Create dependencies ---
+	// --- 6. Create dependencies ---
 	ctx := context.Background()
 
 	deps, err := newDependencies(ctx, cfg, logger)
@@ -100,53 +143,66 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- 6. Create Authentication Middlewares ---
-	// 6a. Discover the JWKS URL once
+	// --- 7. Create Authentication Middlewares ---
+	// 7a. Discover the JWKS URL once
 	jwksURL, err := middleware.DiscoverAndValidateJWTConfig(cfg.IdentityServiceURL, middleware.RSA256, logger)
 	if err != nil {
 		logger.Error("Failed to discover OIDC config", "err", err)
 		os.Exit(1)
 	}
 
-	// 6b. Create the HTTP auth middleware
-	httpAuthMiddleware, err := middleware.NewJWKSAuthMiddleware(jwksURL, logger)
-	if err != nil {
-		logger.Error("Failed to initialize HTTP authentication middleware", "err", err)
-		os.Exit(1)
+	// 7b. Create the HTTP auth middleware (Needed only if API is running)
+	var httpAuthMiddleware func(http.Handler) http.Handler
+	if runAPI {
+		httpAuthMiddleware, err = middleware.NewJWKSAuthMiddleware(jwksURL, logger)
+		if err != nil {
+			logger.Error("Failed to initialize HTTP authentication middleware", "err", err)
+			os.Exit(1)
+		}
 	}
 
-	// 6c. Create the WebSocket auth middleware
-	wsAuthMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger)
-	if err != nil {
-		logger.Error("Failed to initialize WebSocket authentication middleware", "err", err)
-		os.Exit(1)
+	// 7c. Create the WebSocket auth middleware (Needed only if WS is running)
+	var wsAuthMiddleware func(http.Handler) http.Handler
+	if runWS {
+		wsAuthMiddleware, err = middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger)
+		if err != nil {
+			logger.Error("Failed to initialize WebSocket authentication middleware", "err", err)
+			os.Exit(1)
+		}
 	}
 
-	// --- 7. Create the two main services ---
-	apiService, err := routingservice.New(
-		cfg,
-		deps,
-		httpAuthMiddleware,
-		logger.With("component", "ApiService"),
-	)
-	if err != nil {
-		logger.Error("Failed to create API service", "err", err)
-		os.Exit(1)
+	// --- 8. Create the two main services conditionally ---
+	var apiService *routingservice.Wrapper
+	if runAPI {
+		apiService, err = routingservice.New(
+			cfg,
+			deps,
+			httpAuthMiddleware,
+			logger.With("component", "ApiService"),
+		)
+		if err != nil {
+			logger.Error("Failed to create API service", "err", err)
+			os.Exit(1)
+		}
 	}
 
-	connManager, err := realtime.NewConnectionManager(
-		":"+cfg.WebSocketPort, // Prepend ':' for listener
-		wsAuthMiddleware,
-		deps.PresenceCache,
-		deps.MessageQueue,
-		logger.With("component", "ConnManager"),
-	)
-	if err != nil {
-		logger.Error("Failed to create Connection Manager", "err", err)
-		os.Exit(1)
+	var connManager *realtime.ConnectionManager
+	if runWS {
+		connManager, err = realtime.NewConnectionManager(
+			":"+cfg.WebSocketPort, // Prepend ':' for listener
+			wsAuthMiddleware,
+			deps.PresenceCache,
+			deps.MessageQueue,
+			logger.With("component", "ConnManager"),
+		)
+		if err != nil {
+			logger.Error("Failed to create Connection Manager", "err", err)
+			os.Exit(1)
+		}
 	}
 
-	// --- 8. Run the application ---
+	// --- 9. Run the application ---
+	// app.Run handles nil pointers safely thanks to the refactor
 	app.Run(ctx, logger, apiService, connManager)
 }
 

@@ -248,3 +248,55 @@ func TestMigrateHotToCold(t *testing.T) {
 
 	fx.hot.AssertCalled(t, "MigrateToCold", ctx, testURN, fx.cold)
 }
+
+func TestEnqueueHot_Fallback_Ephemeral(t *testing.T) {
+	fx := setup(t)
+	ctx := context.Background()
+
+	// Arrange: Ephemeral Envelope
+	ephemeralEnv := &secure.SecureEnvelope{
+		RecipientID: testURN,
+		IsEphemeral: true, // FLAG SET
+	}
+
+	// 1. Hot queue fails
+	fx.hot.On("Enqueue", ctx, ephemeralEnv).Return(testErr)
+
+	// Act
+	err := fx.comp.EnqueueHot(ctx, ephemeralEnv)
+
+	// Assert
+	require.NoError(t, err) // Should succeed
+
+	// Verify Hot was called
+	fx.hot.AssertCalled(t, "Enqueue", ctx, ephemeralEnv)
+
+	// CRITICAL: Verify Cold was NOT called (Drop Logic)
+	fx.cold.AssertNotCalled(t, "Enqueue", ctx, mock.Anything)
+}
+
+func TestEnqueueHot_Fallback_Persistent(t *testing.T) {
+	fx := setup(t)
+	ctx := context.Background()
+
+	// Arrange: Persistent Envelope
+	persistentEnv := &secure.SecureEnvelope{
+		RecipientID: testURN,
+		IsEphemeral: false, // Default
+	}
+
+	// 1. Hot queue fails
+	fx.hot.On("Enqueue", ctx, persistentEnv).Return(testErr)
+	// 2. Cold queue succeeds
+	fx.cold.On("Enqueue", ctx, persistentEnv).Return(nil)
+
+	// Act
+	err := fx.comp.EnqueueHot(ctx, persistentEnv)
+
+	// Assert
+	require.NoError(t, err)
+
+	// Verify Fallback Logic
+	fx.hot.AssertCalled(t, "Enqueue", ctx, persistentEnv)
+	fx.cold.AssertCalled(t, "Enqueue", ctx, persistentEnv)
+}

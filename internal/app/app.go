@@ -30,30 +30,40 @@ func Run(
 	connManager *realtime.ConnectionManager,
 ) {
 	var wg sync.WaitGroup
-	wg.Add(2)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Start both services in separate goroutines.
-	go func() {
-		defer wg.Done()
-		logger.Info("Starting API Service...")
-		err := apiService.Start(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("API Service failed", "err", err)
-			cancel() // Trigger shutdown of other services.
-		}
-	}()
+	// Start API Service if enabled
+	if apiService != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("Starting API Service...")
+			err := apiService.Start(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("API Service failed", "err", err)
+				cancel() // Trigger shutdown of other services.
+			}
+		}()
+	} else {
+		logger.Info("API Service is disabled.")
+	}
 
-	go func() {
-		defer wg.Done()
-		logger.Info("Starting Connection Manager Service...")
-		err := connManager.Start(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("Connection Manager Service failed", "err", err)
-			cancel() // Trigger shutdown of other services.
-		}
-	}()
+	// Start Connection Manager if enabled
+	if connManager != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("Starting Connection Manager Service...")
+			err := connManager.Start(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Connection Manager Service failed", "err", err)
+				cancel() // Trigger shutdown of other services.
+			}
+		}()
+	} else {
+		logger.Info("Connection Manager Service is disabled.")
+	}
 
 	// Wait for a shutdown signal.
 	shutdown := make(chan os.Signal, 1)
@@ -69,16 +79,20 @@ func Run(
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
-	logger.Info("Shutting down API Service...")
-	err := apiService.Shutdown(shutdownCtx)
-	if err != nil {
-		logger.Error("API Service shutdown failed.", "err", err)
+	if apiService != nil {
+		logger.Info("Shutting down API Service...")
+		err := apiService.Shutdown(shutdownCtx)
+		if err != nil {
+			logger.Error("API Service shutdown failed.", "err", err)
+		}
 	}
 
-	logger.Info("Shutting down Connection Manager...")
-	err = connManager.Shutdown(shutdownCtx)
-	if err != nil {
-		logger.Error("Connection Manager shutdown failed.", "err", err)
+	if connManager != nil {
+		logger.Info("Shutting down Connection Manager...")
+		err := connManager.Shutdown(shutdownCtx)
+		if err != nil {
+			logger.Error("Connection Manager shutdown failed.", "err", err)
+		}
 	}
 
 	wg.Wait()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 )
@@ -48,6 +49,7 @@ func UpdateConfigWithEnvOverrides(cfg *AppConfig, logger *slog.Logger) (*AppConf
 		logger.Debug("Overriding config value", "key", "API_PORT", "source", "env")
 		cfg.APIPort = port
 	}
+
 	if port := os.Getenv("WEBSOCKET_PORT"); port != "" {
 		logger.Debug("Overriding config value", "key", "WEBSOCKET_PORT", "source", "env")
 		cfg.WebSocketPort = port
@@ -57,7 +59,22 @@ func UpdateConfigWithEnvOverrides(cfg *AppConfig, logger *slog.Logger) (*AppConf
 		cfg.HotQueue.Redis.Addr = redisAddr
 	}
 
+	if corsOrigins := os.Getenv("CORS_ALLOWED_ORIGINS"); corsOrigins != "" {
+		logger.Debug("Overriding config value", "key", "CORS_ALLOWED_ORIGINS", "source", "env")
+		// Split by comma and trim spaces
+		rawOrigins := strings.Split(corsOrigins, ",")
+		var cleanOrigins []string
+		for _, o := range rawOrigins {
+			if trimmed := strings.TrimSpace(o); trimmed != "" {
+				cleanOrigins = append(cleanOrigins, trimmed)
+			}
+		}
+		cfg.CorsConfig.AllowedOrigins = cleanOrigins
+	}
+
 	// 2. Final Validation
+	// REMOVED: Port validation is now handled in main.go based on active flags.
+
 	if cfg.ProjectID == "" {
 		logger.Error("Final config validation failed", "error", "GCP_PROJECT_ID is not set")
 		return nil, fmt.Errorf("GCP_PROJECT_ID is not set in config or env var")
@@ -65,14 +82,6 @@ func UpdateConfigWithEnvOverrides(cfg *AppConfig, logger *slog.Logger) (*AppConf
 	if cfg.IdentityServiceURL == "" {
 		logger.Error("Final config validation failed", "error", "IDENTITY_SERVICE_URL is not set")
 		return nil, fmt.Errorf("IDENTITY_SERVICE_URL is not set in config or env var")
-	}
-	if cfg.APIPort == "" {
-		logger.Error("Final config validation failed", "error", "API_PORT is not set")
-		return nil, fmt.Errorf("API_PORT is not set in config or env var")
-	}
-	if cfg.WebSocketPort == "" {
-		logger.Error("Final config validation failed", "error", "WEBSOCKET_PORT is not set")
-		return nil, fmt.Errorf("WEBSOCKET_PORT is not set in config or env var")
 	}
 
 	logger.Debug("Configuration finalized and validated successfully")

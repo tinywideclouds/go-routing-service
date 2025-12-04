@@ -22,7 +22,7 @@ import (
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
-	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 )
 
 // ConnectionManager manages all active WebSocket connections and user presence.
@@ -138,6 +138,8 @@ func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Reque
 	// REFACTOR: Use "Handle is King" resolution for WebSockets too.
 	var userURN urn.URN
 	var parseErr error
+
+	cm.logger.Info("called connection handler")
 
 	if handle, ok := middleware.GetUserHandleFromContext(r.Context()); ok && handle != "" {
 		userURN, parseErr = urn.Parse(handle)

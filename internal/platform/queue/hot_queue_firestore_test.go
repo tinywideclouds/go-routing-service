@@ -231,3 +231,50 @@ func TestMigrateToCold(t *testing.T) {
 	assert.True(t, data1, "Message 1 (from pending) not found in cold queue")
 	assert.True(t, data2, "Message 2 (from main) not found in cold queue")
 }
+
+func TestMigrateToCold_EphemeralDrops(t *testing.T) {
+	fixture := setupHotSuite(t)
+	ctx := fixture.ctx
+
+	recipientURN, _ := urn.Parse("urn:contacts:user:ephemeral-test-user")
+
+	// 1. Prepare Messages
+	msgPersistent := baseEnvelope(recipientURN, "persistent-1")
+	msgEphemeral := baseEnvelope(recipientURN, "ephemeral-1")
+	msgEphemeral.IsEphemeral = true // FLAG SET
+
+	// 2. Enqueue both to Hot Queue
+	err := fixture.hotQueue.Enqueue(ctx, msgPersistent)
+	require.NoError(t, err)
+	err = fixture.hotQueue.Enqueue(ctx, msgEphemeral)
+	require.NoError(t, err)
+
+	// Verify they are in Hot (Main)
+	mainCollectionRef := fixture.fsClient.Collection(fixture.mainCollectionName).Doc(recipientURN.String()).Collection("messages")
+	require.Eventually(t, func() bool {
+		docs, _ := mainCollectionRef.Documents(ctx).GetAll()
+		return len(docs) == 2
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// 3. Act: Migrate
+	err = fixture.hotQueue.MigrateToCold(ctx, recipientURN, fixture.coldQueue)
+	require.NoError(t, err)
+
+	// 4. Assert Hot Queue is Empty (Both deleted)
+	require.Eventually(t, func() bool {
+		docs, _ := mainCollectionRef.Documents(ctx).GetAll()
+		return len(docs) == 0
+	}, 5*time.Second, 100*time.Millisecond, "Hot queue not cleared")
+
+	// 5. Assert Cold Queue has ONLY Persistent message
+	var coldBatch []*routing.QueuedMessage
+	require.Eventually(t, func() bool {
+		coldBatch, err = fixture.coldQueue.RetrieveBatch(ctx, recipientURN, 5)
+		require.NoError(t, err)
+		return len(coldBatch) == 1
+	}, 5*time.Second, 100*time.Millisecond, "Cold queue count incorrect")
+
+	// Verify content
+	assert.Equal(t, "data-persistent-1", string(coldBatch[0].Envelope.EncryptedData))
+	assert.False(t, coldBatch[0].Envelope.IsEphemeral)
+}

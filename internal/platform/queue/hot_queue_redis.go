@@ -190,73 +190,68 @@ func (s *RedisHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, dest
 	log := s.logger.With("user", userURN.String())
 	log.Info("Starting hot-to-cold migration")
 
-	// We'll migrate pending messages first, then main queue messages
 	queueKey := userQueueKey(userURN)
 	pendingKey := userPendingKey(userURN)
 	keysToMigrate := []string{pendingKey, queueKey}
 
-	var allEnvelopes []*secure.SecureEnvelope
+	var messagesToPersist []*secure.SecureEnvelope
 	var payloadsToDelete []string
 	var keysToDelete []string
 
 	for _, key := range keysToMigrate {
 		log.Debug("Scanning key for migration", "key", key)
 
-		// Pull all messages from the list
 		payloads, err := s.client.LRange(ctx, key, 0, -1).Result()
 		if err != nil || len(payloads) == 0 {
 			log.Debug("No messages in key or error, skipping", "key", key, "err", err)
-			continue // No messages or error, move to next key
+			continue
 		}
 
 		log.Debug("Found messages in key", "key", key, "count", len(payloads))
 
-		// Process them
 		for _, payload := range payloads {
 			var msg queuedRedisMessage
 			if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 				log.Error("Failed to unmarshal message for migration, skipping", "err", err, "key", key)
 				continue
 			}
-			allEnvelopes = append(allEnvelopes, msg.Envelope)
+
+			// We ALWAYS mark for deletion from Redis (cleanup).
 			payloadsToDelete = append(payloadsToDelete, payload)
 			keysToDelete = append(keysToDelete, key)
+
+			// We ONLY migrate if it's NOT ephemeral.
+			if !msg.Envelope.IsEphemeral {
+				messagesToPersist = append(messagesToPersist, msg.Envelope)
+			} else {
+				log.Debug("Dropping ephemeral message during migration", "msg_id", msg.ID)
+			}
 		}
 	}
 
-	if len(allEnvelopes) == 0 {
-		log.Info("No hot queue messages to migrate.")
-		return nil
-	}
-
-	log.Debug("Writing messages to cold queue", "count", len(allEnvelopes))
-
-	// Enqueue all messages to the cold store.
-	// This is not atomic with the Redis deletion, but we do it first
-	// to ensure at-least-once.
-	for _, env := range allEnvelopes {
-		if err := destination.Enqueue(ctx, env); err != nil {
-			// This is a partial failure. We stop here.
-			// The messages are still in Redis. The migration will be
-			// retried on the next disconnect.
-			log.Error("Failed to write to cold queue during migration. Aborting.", "err", err)
-			return fmt.Errorf("failed to write to cold queue during migration: %w", err)
+	// 1. Write persistent messages to Cold Queue
+	if len(messagesToPersist) > 0 {
+		log.Debug("Writing messages to cold queue", "count", len(messagesToPersist))
+		for _, env := range messagesToPersist {
+			if err := destination.Enqueue(ctx, env); err != nil {
+				log.Error("Failed to write to cold queue during migration. Aborting.", "err", err)
+				return fmt.Errorf("failed to write to cold queue during migration: %w", err)
+			}
 		}
+	} else {
+		log.Info("No persistent messages to migrate.")
 	}
 
-	log.Debug("Writing to cold queue complete. Deleting from Redis...", "count", len(payloadsToDelete))
-
-	// Now that all messages are safely in the cold store, delete them
-	// from Redis.
+	// 2. Delete ALL messages (including ephemeral) from Hot Queue
+	log.Debug("Cleaning up Redis...", "count", len(payloadsToDelete))
 	for i, payload := range payloadsToDelete {
 		key := keysToDelete[i]
-		// We delete by value, just in case.
 		if err := s.client.LRem(ctx, key, 1, payload).Err(); err != nil {
 			log.Warn("Failed to LRem message during migration cleanup", "err", err, "key", key)
 		}
 	}
 
-	log.Info("Successfully migrated hot queue to cold queue", "count", len(allEnvelopes))
+	log.Info("Successfully migrated hot queue to cold queue", "persisted", len(messagesToPersist), "cleaned", len(payloadsToDelete))
 	return nil
 }
 

@@ -45,6 +45,10 @@ func (c *CompositeMessageQueue) EnqueueHot(ctx context.Context, envelope *secure
 	if err := c.hot.Enqueue(ctx, envelope); err != nil {
 		log.Error("Hot queue enqueue failed. Falling back to cold queue.", "err", err)
 
+		if envelope.IsEphemeral {
+			log.Info("Dropping ephemeral message during hot queue failure (fallback skipped).")
+			return nil // Treat as success (handled)
+		}
 		// Fallback to cold queue
 		if errCold := c.cold.Enqueue(ctx, envelope); errCold != nil {
 			log.Error("FATAL: Hot and Cold queue enqueue failed.", "err_cold", errCold, "err_hot", err)

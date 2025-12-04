@@ -16,7 +16,7 @@ import (
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 
-	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	routingv1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
@@ -282,4 +282,43 @@ func TestRoutingProcessor_HotEnqueueFailure(t *testing.T) {
 	assert.Equal(t, errTest, errors.Unwrap(err))
 	mock.AssertExpectationsForObjects(t, presenceCache, messageQueue)
 	deps.PushNotifier.(*mockPushNotifier).AssertNotCalled(t, "PokeOnline", mock.Anything, mock.Anything)
+}
+
+func TestRoutingProcessor_OfflineUser_Ephemeral(t *testing.T) {
+	// Arrange
+	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
+	messageQueue := new(mockMessageQueue)
+	pushNotifier := new(mockPushNotifier)
+	// We don't even need the token fetcher because it should short-circuit before that
+	deps := &routing.ServiceDependencies{
+		PresenceCache: presenceCache,
+		MessageQueue:  messageQueue,
+		PushNotifier:  pushNotifier,
+	}
+
+	ephemeralEnvelope := &secure.SecureEnvelope{
+		RecipientID:   testURN,
+		EncryptedData: []byte("typing..."),
+		IsEphemeral:   true, // NEW FLAG
+	}
+
+	// 1. User is offline (Fetch returns error)
+	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, errTest)
+
+	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
+
+	// Act
+	err := processor(context.Background(), testMessage, ephemeralEnvelope)
+
+	// Assert
+	require.NoError(t, err) // Should return nil (success/handled)
+
+	// Crucial Checks:
+	// 1. Should NOT fetch tokens (Optimization)
+	// 2. Should NOT send push
+	// 3. Should NOT enqueue cold
+	pushNotifier.AssertNotCalled(t, "NotifyOffline", mock.Anything, mock.Anything, mock.Anything)
+	messageQueue.AssertNotCalled(t, "EnqueueCold", mock.Anything, mock.Anything)
+
+	mock.AssertExpectationsForObjects(t, presenceCache)
 }
