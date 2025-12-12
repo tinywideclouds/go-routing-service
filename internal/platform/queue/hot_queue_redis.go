@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -27,20 +28,20 @@ type redisClient interface {
 }
 
 // RedisHotQueue implements the queue.HotQueue interface using Redis.
-// It uses two lists per user:
-//  1. `queue:{urn}`: The main ingestion queue (LPush/RPop).
-//  2. `pending:{urn}`: A temporary holding list for messages that have been
-//     retrieved by a client but not yet acknowledged (LPush/LRem).
+// It uses THREE lists per user to implement Priority Bands:
+//  1. `queue:{urn}:high`: The Express Lane (Sync, Revoke). Checked FIRST.
+//  2. `queue:{urn}`:      The Standard Lane (Chat, Typing). Checked SECOND.
+//  3. `pending:{urn}`:    The In-Flight list. Shared destination for Ack tracking.
 type RedisHotQueue struct {
 	client redisClient
 	logger *slog.Logger
 }
 
 // queuedRedisMessage is the struct we store as a JSON string in Redis.
-// It wraps the envelope with a unique ID for acknowledgment.
 type queuedRedisMessage struct {
 	ID       string                 `json:"id"`
 	Envelope *secure.SecureEnvelope `json:"envelope"`
+	QueuedAt time.Time              `json:"queued_at"` // Added for observability/TTL potential
 }
 
 // NewRedisHotQueue is the constructor for the RedisHotQueue.
@@ -54,14 +55,14 @@ func NewRedisHotQueue(client redisClient, logger *slog.Logger) (queue.HotQueue, 
 	}, nil
 }
 
-// Enqueue adds a message to the left side (head) of the user's main queue list.
+// Enqueue adds a message to the appropriate priority band.
 func (s *RedisHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	log := s.logger.With("user", envelope.RecipientID.String())
+	log := s.logger.With("user", envelope.RecipientID.String(), "priority", envelope.Priority)
 
-	// We generate a UUID to be the ACK ID.
 	msg := queuedRedisMessage{
 		ID:       uuid.NewString(),
 		Envelope: envelope,
+		QueuedAt: time.Now().UTC(),
 	}
 
 	payload, err := json.Marshal(msg)
@@ -70,8 +71,15 @@ func (s *RedisHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnve
 		return fmt.Errorf("failed to marshal redis message: %w", err)
 	}
 
-	key := userQueueKey(envelope.RecipientID)
-	log.Debug("Enqueuing message to hot queue", "key", key, "msg_id", msg.ID)
+	// 1. Determine Target Lane based on Priority
+	var key string
+	if envelope.Priority >= 5 {
+		key = userHighQueueKey(envelope.RecipientID) // Express Lane
+		log.Info("Enqueuing to HIGH priority band", "key", key)
+	} else {
+		key = userQueueKey(envelope.RecipientID) // Standard Lane
+		log.Debug("Enqueuing to STANDARD priority band", "key", key)
+	}
 
 	if err := s.client.LPush(ctx, key, payload).Err(); err != nil {
 		log.Error("Failed to lpush to hot queue", "key", key, "err", err)
@@ -80,27 +88,31 @@ func (s *RedisHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnve
 	return nil
 }
 
-// RetrieveBatch atomically moves messages from the main queue to the pending queue.
-// It uses RPopLPush to take items from the *right* (oldest) of the main queue
-// and place them on the *left* (newest) of the pending queue.
+// RetrieveBatch drains the High Priority band FIRST, then the Standard band.
 func (s *RedisHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
 	log := s.logger.With("user", userURN.String())
-	queueKey := userQueueKey(userURN)
+
+	highKey := userHighQueueKey(userURN)
+	stdKey := userQueueKey(userURN)
 	pendingKey := userPendingKey(userURN)
 
 	queuedMessages := make([]*routing.QueuedMessage, 0, limit)
 
-	log.Debug("Retrieving hot message batch", "limit", limit, "queue_key", queueKey, "pending_key", pendingKey)
+	log.Debug("Retrieving hot message batch", "limit", limit)
 
 	for i := 0; i < limit; i++ {
-		// Atomically move one message from the right of the queue
-		// to the left of the pending list.
-		payload, err := s.client.RPopLPush(ctx, queueKey, pendingKey).Result()
+		// 1. Priority Fetch Strategy
+		// Try to pop from High Priority first.
+		payload, err := s.client.RPopLPush(ctx, highKey, pendingKey).Result()
+
 		if err == redis.Nil {
-			// The queue is empty, we're done.
-			if i == 0 {
-				log.Debug("Hot queue is empty")
-			}
+			// High Priority is empty. Fallback to Standard.
+			payload, err = s.client.RPopLPush(ctx, stdKey, pendingKey).Result()
+		}
+
+		// 2. Check Result (from whichever queue we tried)
+		if err == redis.Nil {
+			// Both queues are empty. We are done.
 			break
 		}
 		if err != nil {
@@ -108,18 +120,16 @@ func (s *RedisHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limi
 			return nil, fmt.Errorf("failed to rpoplpush message: %w", err)
 		}
 
-		// Unmarshal the message we just moved
+		// 3. Unmarshal
 		var msg queuedRedisMessage
 		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 			log.Error("Failed to unmarshal poison message from hot queue", "err", err)
-
-			// Remove the poison message from the pending queue to stop a loop
-			log.Warn("Removing poison message from pending queue", "key", pendingKey)
+			// Cleanup poison pill
 			_ = s.client.LRem(ctx, pendingKey, 1, payload)
 			continue
 		}
 
-		// Convert to the external type
+		// 4. Append
 		queuedMessages = append(queuedMessages, &routing.QueuedMessage{
 			ID:       msg.ID,
 			Envelope: msg.Envelope,
@@ -127,14 +137,12 @@ func (s *RedisHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limi
 	}
 
 	if len(queuedMessages) > 0 {
-		log.Debug("Retrieved and moved hot message batch to pending", "count", len(queuedMessages))
+		log.Debug("Retrieved hot message batch", "count", len(queuedMessages))
 	}
 	return queuedMessages, nil
 }
 
-// Acknowledge removes messages from the *pending* list by their ID.
-// It does this by fetching all pending messages, finding the matching payload
-// for the ID, and then removing that payload *by value* from the list.
+// Acknowledge removes messages from the pending list.
 func (s *RedisHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
 	if len(messageIDs) == 0 {
 		return nil
@@ -143,120 +151,93 @@ func (s *RedisHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, messag
 	pendingKey := userPendingKey(userURN)
 	log := s.logger.With("user", userURN.String(), "pending_key", pendingKey)
 
-	// Get all pending messages
-	log.Debug("Ack: Fetching all pending messages to find by ID", "count", len(messageIDs))
+	// Fetch all pending messages to match IDs to Payloads
 	payloads, err := s.client.LRange(ctx, pendingKey, 0, -1).Result()
 	if err != nil {
 		log.Error("Failed to read pending queue for ack", "err", err)
 		return fmt.Errorf("failed to read pending queue for ack: %w", err)
 	}
 
-	// Create a map of IDs to payloads for efficient lookup
 	idMap := make(map[string]string)
 	for _, payload := range payloads {
 		var msg queuedRedisMessage
-		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
-			log.Warn("Failed to unmarshal message in pending queue during ack", "err", err)
-			continue
+		if err := json.Unmarshal([]byte(payload), &msg); err == nil {
+			idMap[msg.ID] = payload
 		}
-		idMap[msg.ID] = payload
 	}
 
-	// For each ID we need to ack, find its payload and remove it
 	var ackCount int
 	for _, id := range messageIDs {
-		payloadToRemove, ok := idMap[id]
-		if !ok {
-			log.Warn("Attempted to ack message ID not in pending queue", "id", id)
-			continue
-		}
-
-		// Remove by value. This removes the first matching payload.
-		if err := s.client.LRem(ctx, pendingKey, 1, payloadToRemove).Err(); err != nil {
-			log.Error("Failed to lrem message from pending queue", "err", err, "id", id)
-			// Continue trying to ack other messages
-		} else {
-			ackCount++
+		if payloadToRemove, ok := idMap[id]; ok {
+			if err := s.client.LRem(ctx, pendingKey, 1, payloadToRemove).Err(); err == nil {
+				ackCount++
+			}
 		}
 	}
 
-	log.Info("Successfully acknowledged (deleted) hot pending messages", "count", ackCount)
+	log.Info("Successfully acknowledged hot pending messages", "count", ackCount)
 	return nil
 }
 
-// MigrateToCold moves all messages from both the main and pending queues
-// to the ColdQueue.
+// MigrateToCold moves all messages from High, Standard, and Pending queues to ColdQueue.
 func (s *RedisHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, destination queue.ColdQueue) error {
 	log := s.logger.With("user", userURN.String())
 	log.Info("Starting hot-to-cold migration")
 
-	queueKey := userQueueKey(userURN)
-	pendingKey := userPendingKey(userURN)
-	keysToMigrate := []string{pendingKey, queueKey}
+	// We must now scan THREE lists
+	keysToMigrate := []string{
+		userPendingKey(userURN),   // 1. Pending (In-flight)
+		userHighQueueKey(userURN), // 2. High Priority (Unsent)
+		userQueueKey(userURN),     // 3. Standard (Unsent)
+	}
 
 	var messagesToPersist []*secure.SecureEnvelope
 	var payloadsToDelete []string
 	var keysToDelete []string
 
 	for _, key := range keysToMigrate {
-		log.Debug("Scanning key for migration", "key", key)
-
 		payloads, err := s.client.LRange(ctx, key, 0, -1).Result()
 		if err != nil || len(payloads) == 0 {
-			log.Debug("No messages in key or error, skipping", "key", key, "err", err)
 			continue
 		}
-
-		log.Debug("Found messages in key", "key", key, "count", len(payloads))
 
 		for _, payload := range payloads {
 			var msg queuedRedisMessage
 			if err := json.Unmarshal([]byte(payload), &msg); err != nil {
-				log.Error("Failed to unmarshal message for migration, skipping", "err", err, "key", key)
 				continue
 			}
 
-			// We ALWAYS mark for deletion from Redis (cleanup).
+			// Mark for deletion from Redis
 			payloadsToDelete = append(payloadsToDelete, payload)
 			keysToDelete = append(keysToDelete, key)
 
-			// We ONLY migrate if it's NOT ephemeral.
+			// Migration Logic: Persist if NOT ephemeral
 			if !msg.Envelope.IsEphemeral {
 				messagesToPersist = append(messagesToPersist, msg.Envelope)
-			} else {
-				log.Debug("Dropping ephemeral message during migration", "msg_id", msg.ID)
 			}
 		}
 	}
 
 	// 1. Write persistent messages to Cold Queue
 	if len(messagesToPersist) > 0 {
-		log.Debug("Writing messages to cold queue", "count", len(messagesToPersist))
 		for _, env := range messagesToPersist {
 			if err := destination.Enqueue(ctx, env); err != nil {
-				log.Error("Failed to write to cold queue during migration. Aborting.", "err", err)
-				return fmt.Errorf("failed to write to cold queue during migration: %w", err)
+				return fmt.Errorf("failed to write to cold queue: %w", err)
 			}
 		}
-	} else {
-		log.Info("No persistent messages to migrate.")
 	}
 
-	// 2. Delete ALL messages (including ephemeral) from Hot Queue
-	log.Debug("Cleaning up Redis...", "count", len(payloadsToDelete))
+	// 2. Cleanup Redis
 	for i, payload := range payloadsToDelete {
-		key := keysToDelete[i]
-		if err := s.client.LRem(ctx, key, 1, payload).Err(); err != nil {
-			log.Warn("Failed to LRem message during migration cleanup", "err", err, "key", key)
-		}
+		_ = s.client.LRem(ctx, keysToDelete[i], 1, payload).Err()
 	}
 
-	log.Info("Successfully migrated hot queue to cold queue", "persisted", len(messagesToPersist), "cleaned", len(payloadsToDelete))
+	log.Info("Migration complete", "persisted", len(messagesToPersist), "cleaned", len(payloadsToDelete))
 	return nil
 }
 
 // --- Private Helpers ---
 
-// key formatting helpers
-func userQueueKey(urn urn.URN) string   { return fmt.Sprintf("queue:%s", urn.String()) }
-func userPendingKey(urn urn.URN) string { return fmt.Sprintf("pending:%s", urn.String()) }
+func userQueueKey(urn urn.URN) string     { return fmt.Sprintf("queue:%s", urn.String()) }
+func userHighQueueKey(urn urn.URN) string { return fmt.Sprintf("queue:%s:high", urn.String()) }
+func userPendingKey(urn urn.URN) string   { return fmt.Sprintf("pending:%s", urn.String()) }

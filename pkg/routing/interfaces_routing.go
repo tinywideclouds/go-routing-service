@@ -14,12 +14,11 @@ type IngestionProducer interface {
 	Publish(ctx context.Context, envelope *secure.SecureEnvelope) error
 }
 
-// PushNotifier defines the interface for notifying users of new messages,
-// whether they are online ("poke") or offline ("push").
+// PushNotifier defines the interface for notifying users of new messages.
+// REFACTORED: No longer takes a list of tokens. It just takes the envelope (which contains the Recipient ID).
 type PushNotifier interface {
-	// NotifyOffline sends a rich push notification (with content) to a user's
-	// registered devices. This is for the "cold" path.
-	NotifyOffline(ctx context.Context, tokens []DeviceToken, envelope *secure.SecureEnvelope) error
+	// NotifyOffline sends a command to the Notification Service to notify the user.
+	NotifyOffline(ctx context.Context, envelope *secure.SecureEnvelope) error
 
 	// PokeOnline sends a lightweight "poke" notification to a specific
 	// user's active connection(s). This is for the "hot" path.

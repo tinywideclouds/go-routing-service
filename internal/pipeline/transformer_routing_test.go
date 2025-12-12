@@ -23,16 +23,26 @@ func TestEnvelopeTransformer(t *testing.T) {
 	recipientURN, err := urn.Parse("urn:contacts:user:user-bob")
 	require.NoError(t, err)
 
+	// Base valid envelope (Standard Priority)
 	validEnvelope := secure.SecureEnvelope{
 		RecipientID:   recipientURN,
 		EncryptedData: []byte("test"),
+		Priority:      1, // Standard
 	}
-	// The transformer expects a Protobuf JSON payload.
 	validPayload, err := protojson.Marshal(secure.ToProto(&validEnvelope))
 	require.NoError(t, err, "Setup: failed to marshal valid envelope")
 
-	// This payload will correctly fail the "entity type must not be empty"
-	// check in urn.Parse() when secure.FromProto() is called.
+	// High Priority Envelope (Device Sync / Express Lane)
+	highPriEnvelope := secure.SecureEnvelope{
+		RecipientID:   recipientURN,
+		EncryptedData: []byte("sync-key"),
+		IsEphemeral:   true,
+		Priority:      5, // HIGH
+	}
+	highPriPayload, err := protojson.Marshal(secure.ToProto(&highPriEnvelope))
+	require.NoError(t, err, "Setup: failed to marshal high priority envelope")
+
+	// Invalid Payload
 	invalidPayload := []byte(`{"recipientId": "urn:message::invalid-id"}`)
 
 	testCases := []struct {
@@ -44,7 +54,7 @@ func TestEnvelopeTransformer(t *testing.T) {
 		expectedErrorContains string
 	}{
 		{
-			name: "Success - Valid Payload",
+			name: "Success - Standard Priority",
 			inputMessage: &messagepipeline.Message{
 				MessageData: messagepipeline.MessageData{
 					ID:      "msg-123",
@@ -52,6 +62,18 @@ func TestEnvelopeTransformer(t *testing.T) {
 				},
 			},
 			expectedEnvelope: &validEnvelope,
+			expectedSkip:     false,
+			expectError:      false,
+		},
+		{
+			name: "Success - High Priority (Express Lane)",
+			inputMessage: &messagepipeline.Message{
+				MessageData: messagepipeline.MessageData{
+					ID:      "msg-999",
+					Payload: highPriPayload,
+				},
+			},
+			expectedEnvelope: &highPriEnvelope,
 			expectedSkip:     false,
 			expectError:      false,
 		},
@@ -79,7 +101,7 @@ func TestEnvelopeTransformer(t *testing.T) {
 			expectedEnvelope:      nil,
 			expectedSkip:          true,
 			expectError:           true,
-			expectedErrorContains: "failed to convert/validate envelope", // Error from secure.FromProto
+			expectedErrorContains: "failed to convert/validate envelope",
 		},
 	}
 

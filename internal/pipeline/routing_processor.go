@@ -13,83 +13,71 @@ import (
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 )
 
-// NewRoutingProcessor creates the main message handler (StreamProcessor) for the routing pipeline.
-// This processor function contains the core business logic of the service.
-//
-// It determines user presence and routes messages:
-//  1. **Online User (Hot Path):** Enqueues to the hot queue and sends a "poke" notification.
-//  2. **Offline User (Cold Path):** Fetches device tokens, sends a "rich push" notification,
-//     and enqueues to the cold queue.
+const priorityHigh = 5
+
 func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfig, logger *slog.Logger) messagepipeline.StreamProcessor[secure.SecureEnvelope] {
 	return func(ctx context.Context, msg messagepipeline.Message, envelope *secure.SecureEnvelope) error {
 		recipientURN := envelope.RecipientID
-		procLogger := logger.With("recipient_id", recipientURN.String(), "msg_id", msg.ID)
+		procLogger := logger.With(
+			"recipient_id", recipientURN.String(),
+			"msg_id", msg.ID,
+			"priority", envelope.Priority,
+		)
 
-		// 1. Check if the user is online via the presence cache.
-		if _, err := deps.PresenceCache.Fetch(ctx, recipientURN); err == nil {
-			// --- HOT PATH ---
-			procLogger.Info("User is online. Routing message to HOT queue.")
+		// 1. Check Presence
+		_, err := deps.PresenceCache.Fetch(ctx, recipientURN)
+		isOnline := (err == nil)
+
+		// --- EXPRESS LANE (High Priority) ---
+		if envelope.Priority >= priorityHigh {
+			procLogger.Info("Processing HIGH PRIORITY message (Express Lane)")
+
 			if err := deps.MessageQueue.EnqueueHot(ctx, envelope); err != nil {
-				// If EnqueueHot fails, it automatically falls back to cold.
-				// If *that* fails, the error is returned.
-				procLogger.Error("Failed to enqueue message (hot and cold fallback)", "err", err)
-				return fmt.Errorf("failed to enqueue message (hot and cold fallback): %w", err)
+				procLogger.Error("Failed to enqueue High Priority message", "err", err)
+				return fmt.Errorf("failed to enqueue High Priority message: %w", err)
 			}
 
-			// After successful enqueue, send a "poke" notification.
-			procLogger.Debug("Sending 'poke' notification")
-			if err := deps.PushNotifier.PokeOnline(ctx, recipientURN); err != nil {
-				// Non-critical, just log it. The message is already queued.
-				procLogger.Warn("Failed to send online 'poke' notification", "err", err)
+			if isOnline {
+				procLogger.Debug("Express Lane: User is online, sending poke")
+				_ = deps.PushNotifier.PokeOnline(ctx, recipientURN)
+			} else {
+				procLogger.Debug("Express Lane: User is offline, sending push")
+				// REFACTORED: Direct call, no token fetching
+				_ = deps.PushNotifier.NotifyOffline(ctx, envelope)
 			}
 			return nil
 		}
 
-		// If the user is offline and the message is ephemeral (e.g., typing indicator),
-		// we drop it immediately. We do NOT store it, and we do NOT send a push.
+		// --- STANDARD LANE ---
+		if isOnline {
+			procLogger.Info("User is online. Routing message to HOT queue.")
+			if err := deps.MessageQueue.EnqueueHot(ctx, envelope); err != nil {
+				return fmt.Errorf("failed to enqueue message: %w", err)
+			}
+			_ = deps.PushNotifier.PokeOnline(ctx, recipientURN)
+			return nil
+		}
+
+		// Offline Drops
 		if envelope.IsEphemeral {
 			procLogger.Info("User is offline and message is ephemeral. Dropping message.")
 			return nil
 		}
 
-		// --- COLD PATH ---
-		// 2. User is offline. Fetch their device tokens for push notifications.
-		procLogger.Info("User is offline. Checking for push notification tokens.")
-		tokens, err := deps.DeviceTokenFetcher.Fetch(ctx, recipientURN)
-		if err != nil {
-			procLogger.Warn("Failed to fetch device tokens. Message will be stored but no push will be sent.", "err", err)
-			// Non-critical. We must still store the message.
+		// Offline Cold Path
+		procLogger.Info("User is offline. Routing message to COLD queue.")
+
+		// REFACTORED: Direct call
+		if err := deps.PushNotifier.NotifyOffline(ctx, envelope); err != nil {
+			procLogger.Warn("Failed to send offline notification", "err", err)
+			// Non-critical error, continue to enqueue
 		}
 
-		// 3. Separate tokens for mobile.
-		var mobileTokens []routing.DeviceToken
-		for _, token := range tokens {
-			if token.Platform == "ios" || token.Platform == "android" {
-				mobileTokens = append(mobileTokens, token)
-			}
-		}
-
-		// 4. Send mobile notifications.
-		if len(mobileTokens) > 0 {
-			procLogger.Info("Routing notification to push notification service", "count", len(mobileTokens))
-
-			// We send the *full* envelope here for a rich push.
-			if err := deps.PushNotifier.NotifyOffline(ctx, mobileTokens, envelope); err != nil {
-				procLogger.Error("Push notifier failed. Message will be stored, but this error is logged.", "err", err)
-				// Non-critical. We still must store.
-			}
-
-		} else {
-			procLogger.Debug("User is offline but has no mobile tokens. Storing in cold queue only.")
-		}
-
-		// 5. Finally, store the message in the COLD queue.
-		procLogger.Info("Storing message in COLD queue for later retrieval.")
 		if err := deps.MessageQueue.EnqueueCold(ctx, envelope); err != nil {
-			// This is a critical error. Return it to trigger a NACK.
 			procLogger.Error("Failed to store message in cold queue", "err", err)
 			return fmt.Errorf("failed to store message in cold queue: %w", err)
 		}
+
 		return nil
 	}
 }

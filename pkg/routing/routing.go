@@ -1,6 +1,4 @@
 // --- File: pkg/routing/routing.go ---
-// Package routing consolidates core domain types and service dependency
-// definitions for the routing service.
 package routing
 
 import (
@@ -12,7 +10,6 @@ import (
 )
 
 // ConnectionInfo holds details about a user's real-time connection.
-// This is stored in the presence cache.
 type ConnectionInfo struct {
 	ServerInstanceID string `json:"serverInstanceId"`
 	ConnectedAt      int64  `json:"connectedAt"`
@@ -21,11 +18,10 @@ type ConnectionInfo struct {
 // DeviceToken represents a push notification token for a user's device.
 type DeviceToken struct {
 	Token    string `json:"token"`
-	Platform string `json:"platform"` // e.g., "ios", "android"
+	Platform string `json:"platform"`
 }
 
-// ServiceDependencies holds all the external services the routing service needs to operate.
-// This struct is used for dependency injection.
+// ServiceDependencies holds all the external services the routing service needs.
 type ServiceDependencies struct {
 	// --- Producers ---
 	IngestionProducer IngestionProducer
@@ -34,9 +30,9 @@ type ServiceDependencies struct {
 	IngestionConsumer messagepipeline.MessageConsumer
 
 	// --- Storage & Caches ---
-	MessageQueue       queue.MessageQueue
-	PresenceCache      cache.PresenceCache[urn.URN, ConnectionInfo]
-	DeviceTokenFetcher cache.Fetcher[urn.URN, []DeviceToken]
+	MessageQueue  queue.MessageQueue
+	PresenceCache cache.PresenceCache[urn.URN, ConnectionInfo]
+	// REMOVED: DeviceTokenFetcher is no longer needed.
 
 	// --- Notifiers ---
 	PushNotifier PushNotifier

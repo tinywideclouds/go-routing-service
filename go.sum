@@ -266,12 +266,12 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/testcontainers/testcontainers-go v0.38.0 h1:d7uEapLcv2P8AvH8ahLqDMMxda2W9gQN1nRbHS28HBw=
 github.com/testcontainers/testcontainers-go v0.38.0/go.mod h1:C52c9MoHpWO+C4aqmgSU+hxlR5jlEayWtgYrb8Pzz1w=
-github.com/tinywideclouds/gen-platform v0.0.4 h1:66qYiep/DYtSyzuItUB8+3wDC7nmRdbMH8pvy3/4aGI=
-github.com/tinywideclouds/gen-platform v0.0.4/go.mod h1:COG3BwD4rMgdquKXsTui0nNaI9w/b4hbgmBVDOjwGqg=
+github.com/tinywideclouds/gen-platform v0.0.6 h1:9VkhDDBbb5888GH0ST7VpLQdXwLh6bUoI+HStgd1Eng=
+github.com/tinywideclouds/gen-platform v0.0.6/go.mod h1:COG3BwD4rMgdquKXsTui0nNaI9w/b4hbgmBVDOjwGqg=
 github.com/tinywideclouds/go-microservice-base v0.0.8 h1:pKfryXthmyhxUt061wKtbSAW1UC462xgSQcMmWz/UOM=
 github.com/tinywideclouds/go-microservice-base v0.0.8/go.mod h1:nNduT8giB35Ep//YPjcUg95/6FY/kfsH16qUS5nLKN0=
-github.com/tinywideclouds/go-platform v0.0.8 h1:YQn4DfdccJx8rznTphPHqsKo+v4qH7lCcu9ZQ4vFL2s=
-github.com/tinywideclouds/go-platform v0.0.8/go.mod h1:jcJwQT1b8R8TNkBFf1FLwn22Z9W1zmxg3Kpwv1Bl2QU=
+github.com/tinywideclouds/go-platform v0.0.11 h1:QxOtaftFar5gHkhKg/aKX5q0FsiYFpE6BQtpVjo/dHQ=
+github.com/tinywideclouds/go-platform v0.0.11/go.mod h1:V+gr1tNgNJT2ejDJmxR1b+B7AZ8kCWu9fEbvHB2sSaE=
 github.com/tklauser/go-sysconf v0.3.12 h1:0QaGUFOdQaIVdPgfITYzaTegZvdCjmYO52cSFAEVmqU=
 github.com/tklauser/go-sysconf v0.3.12/go.mod h1:Ho14jnntGE1fpdOqQEEaiKRpvIavV0hSfmBq8nJbHYI=
 github.com/tklauser/numcpus v0.6.1 h1:ng9scYS7az0Bk4OZLvrNXNSAO2Pxr1XXRAPyjhIx+Fk=

@@ -1,3 +1,4 @@
+// --- File: cmd/e2e/routing_e2e_test.go ---
 //go:build integration
 
 /*
@@ -37,7 +38,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/internal/app"
-	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	psub "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
 	"github.com/tinywideclouds/go-routing-service/internal/queue"
@@ -48,33 +48,33 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
-	"github.com/tinywideclouds/go-platform/pkg/net/v1"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	routingV1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
 // --- Test Helpers ---
 
-// --- START OF REFACTOR ---
-// mockPushNotifier now implements the new routing.PushNotifier interface
+// mockPushNotifier implements the new routing.PushNotifier interface.
+// It uses channels to signal when a notification type is sent, allowing
+// the test to synchronize on these events.
 type mockPushNotifier struct {
 	pokeHandled chan urn.URN
 	pushHandled chan urn.URN
 }
 
-func (m *mockPushNotifier) NotifyOffline(_ context.Context, tokens []routing.DeviceToken, envelope *secure.SecureEnvelope) error {
-	// This is the "rich push" path
+// NotifyOffline corresponds to the "Cold Path".
+// It receives the envelope directly (no tokens).
+func (m *mockPushNotifier) NotifyOffline(_ context.Context, envelope *secure.SecureEnvelope) error {
 	m.pushHandled <- envelope.RecipientID
 	return nil
 }
 
+// PokeOnline corresponds to the "Hot Path".
 func (m *mockPushNotifier) PokeOnline(_ context.Context, recipient urn.URN) error {
-	// This is the "poke" path
 	m.pokeHandled <- recipient
 	return nil
 }
-
-// --- END OF REFACTOR ---
 
 func newJWKSTestServer(t *testing.T, privateKey *rsa.PrivateKey) *httptest.Server {
 	t.Helper()
@@ -198,22 +198,19 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 	createTopic(t, ctx, psClient, projectID, testConfig.IngressTopicID)
 	createTopic(t, ctx, psClient, projectID, testConfig.PushNotificationsTopicID)
 
-	// --- START OF REFACTOR ---
-	pokeHandled := make(chan urn.URN, 1) // Now receives a URN
+	// Mock Notifier with channels
+	pokeHandled := make(chan urn.URN, 1)
 	pushHandled := make(chan urn.URN, 1)
-	// --- END OF REFACTOR ---
 	mockNotifier := &mockPushNotifier{pokeHandled: pokeHandled, pushHandled: pushHandled}
 
 	deps, err := assembleTestDependencies(ctx, psClient, fsClient, testConfig, mockNotifier, logger)
 	require.NoError(t, err)
 
 	// --- 3. Start the FULL Routing Service (API + ConnectionManager) ---
-	// --- (FIX) We need to get the JWKS URL, not the base server URL ---
 	jwksURL := jwksServer.URL + "/.well-known/jwks.json"
 	authMiddleware, err := middleware.NewJWKSAuthMiddleware(jwksURL, logger)
 	require.NoError(t, err)
 
-	// --- (FIX) We need a *separate* WS auth middleware ---
 	wsAuthMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger)
 	require.NoError(t, err)
 
@@ -222,13 +219,12 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 
 	connManager, err := realtime.NewConnectionManager(
 		testConfig.WebSocketPort,
-		wsAuthMiddleware, // <-- Use the correct middleware
+		wsAuthMiddleware,
 		deps.PresenceCache,
 		deps.MessageQueue,
 		logger,
 	)
 	require.NoError(t, err)
-	// --- END OF FIXES ---
 
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	t.Cleanup(cancelService)
@@ -252,10 +248,8 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 
 	// --- PHASE 1: Bob Connects (Hot Path Setup) ---
 	t.Log("Phase 1: Bob connecting via WebSocket...")
-	// --- (FIX) Use the Sec-WebSocket-Protocol header for the token ---
 	wsHeaders := http.Header{"Sec-WebSocket-Protocol": []string{recipientToken}}
 	wsConn, _, err := websocket.DefaultDialer.Dial(wsServerURL+"/connect", wsHeaders)
-	// --- END OF FIX ---
 	require.NoError(t, err, "Failed to connect WebSocket client")
 	t.Cleanup(func() { _ = wsConn.Close() })
 
@@ -278,7 +272,7 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, sendResp.StatusCode)
 	_ = sendResp.Body.Close()
 
-	// --- START OF REFACTOR ---
+	// Assert "Poke" was sent (since Bob is online)
 	select {
 	case recipient := <-pokeHandled:
 		t.Logf("✅ 'Poke' notification received for %s.", recipient.String())
@@ -288,7 +282,6 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Test timed out waiting for 'poke' notification")
 	}
-	// --- END OF REFACTOR ---
 
 	var hotDocs []*firestore.DocumentSnapshot
 	require.Eventually(t, func() bool {
@@ -358,7 +351,7 @@ func assembleTestDependencies(
 	psClient *pubsub.Client,
 	fsClient *firestore.Client,
 	cfg *config.AppConfig,
-	notifier routing.PushNotifier,
+	pushNotifier routing.PushNotifier,
 	logger *slog.Logger,
 ) (*routing.ServiceDependencies, error) {
 
@@ -407,25 +400,14 @@ func assembleTestDependencies(
 	// Use an in-memory presence cache for E2E test speed
 	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]()
 
-	// Use a real token fetcher
-	stringDocFetcher, err := cache.NewFirestore[string, persistence.DeviceTokenDoc](
-		ctx,
-		&cache.FirestoreConfig{ProjectID: cfg.ProjectID, CollectionName: "device-tokens"},
-		fsClient,
-		zerolog.Nop(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	stringTokenFetcher := &persistence.FirestoreTokenAdapter{DocFetcher: stringDocFetcher}
-	deviceTokenFetcher := persistence.NewURNTokenFetcherAdapter(stringTokenFetcher)
+	// REFACTORED: NO DeviceTokenFetcher is created or injected here.
 
 	return &routing.ServiceDependencies{
-		IngestionProducer:  ingressProducer,
-		IngestionConsumer:  ingressConsumer,
-		MessageQueue:       messageQueue,
-		PresenceCache:      presenceCache,
-		DeviceTokenFetcher: deviceTokenFetcher,
-		PushNotifier:       notifier,
+		IngestionProducer: ingressProducer,
+		IngestionConsumer: ingressConsumer,
+		MessageQueue:      messageQueue,
+		PresenceCache:     presenceCache,
+		// REMOVED: DeviceTokenFetcher
+		PushNotifier: pushNotifier,
 	}, nil
 }

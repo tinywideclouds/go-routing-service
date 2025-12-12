@@ -257,10 +257,6 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger *slo
 	if err != nil {
 		return nil, err
 	}
-	tokenFetcher, err := newFirestoreTokenFetcher(ctx, cfg, fsClient, logger)
-	if err != nil {
-		return nil, err
-	}
 	ingestConsumer, err := newIngestionConsumer(ctx, cfg, psClient, logger)
 	if err != nil {
 		return nil, err
@@ -273,12 +269,11 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger *slo
 	logger.Debug("All production dependencies initialized")
 
 	return &routing.ServiceDependencies{
-		IngestionProducer:  ingestProducer,
-		IngestionConsumer:  ingestConsumer,
-		MessageQueue:       messageQueue,
-		PresenceCache:      presenceCache,
-		DeviceTokenFetcher: tokenFetcher,
-		PushNotifier:       pushNotifier,
+		IngestionProducer: ingestProducer,
+		IngestionConsumer: ingestConsumer,
+		MessageQueue:      messageQueue,
+		PresenceCache:     presenceCache,
+		PushNotifier:      pushNotifier,
 	}, nil
 }
 

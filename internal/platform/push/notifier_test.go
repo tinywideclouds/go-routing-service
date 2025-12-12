@@ -42,11 +42,6 @@ func TestNotifyOffline(t *testing.T) {
 		EncryptedData: []byte("this-should-not-be-in-the-push"),
 	}
 
-	testTokens := []routing.DeviceToken{
-		{Token: "ios-token-123", Platform: "ios"},
-		{Token: "android-token-456", Platform: "android"},
-	}
-
 	t.Run("Success - Publishes correct 'dumb' payload", func(t *testing.T) {
 		// Arrange
 		producer := new(mockEventProducer)
@@ -61,7 +56,7 @@ func TestNotifyOffline(t *testing.T) {
 			Return("mock-message-id", nil)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope)
+		err = notifier.NotifyOffline(ctx, testEnvelope)
 
 		// Assert
 		require.NoError(t, err)
@@ -81,7 +76,7 @@ func TestNotifyOffline(t *testing.T) {
 		// 2. Assert its contents
 		assert.Equal(t, "New Message", actualRequest.Content.Title)
 		assert.Equal(t, "You have received a new secure message.", actualRequest.Content.Body)
-		assert.Equal(t, testTokens, actualRequest.Tokens)
+
 	})
 
 	t.Run("Success - No tokens skips publish", func(t *testing.T) {
@@ -91,7 +86,7 @@ func TestNotifyOffline(t *testing.T) {
 		require.NoError(t, err)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, []routing.DeviceToken{}, testEnvelope)
+		err = notifier.NotifyOffline(ctx, testEnvelope)
 
 		// Assert
 		require.NoError(t, err)
@@ -108,7 +103,7 @@ func TestNotifyOffline(t *testing.T) {
 		producer.On("Publish", ctx, mock.Anything).Return("", testErr)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, testTokens, testEnvelope)
+		err = notifier.NotifyOffline(ctx, testEnvelope)
 
 		// Assert
 		require.Error(t, err)
@@ -122,7 +117,7 @@ func TestNotifyOffline(t *testing.T) {
 		require.NoError(t, err)
 
 		// Act
-		err = notifier.NotifyOffline(ctx, testTokens, nil) // Pass nil envelope
+		err = notifier.NotifyOffline(ctx, nil) // Pass nil envelope
 
 		// Assert
 		require.Error(t, err)
