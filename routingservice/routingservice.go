@@ -7,20 +7,17 @@ package routingservice
 
 import (
 	"context"
-	"errors" // <-- ADDED
+	"errors"
 	"fmt"
-	"log/slog" // IMPORTED
+	"log/slog"
 	"net/http"
-	"os"
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
-	"github.com/rs/zerolog" // needed for noisy logger in pipeline
 	"github.com/tinywideclouds/go-routing-service/internal/api"
 	"github.com/tinywideclouds/go-routing-service/internal/pipeline"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 	"github.com/tinywideclouds/go-routing-service/routingservice/config"
 
-	// REFACTORED: Use new base server and platform types
 	"github.com/tinywideclouds/go-microservice-base/pkg/microservice"
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
@@ -111,14 +108,13 @@ func newProcessingService(
 	processorLogger := logger.With("component", "RoutingProcessor") // ADDED
 	processor := pipeline.NewRoutingProcessor(dependencies, cfg, processorLogger)
 
-	// streamLogger := logger.With("component", "StreamingService") // ADDED
-	noisyZerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	streamLogger := logger.With("component", "StreamingService") // ADDED
 	return messagepipeline.NewStreamingService(
 		messagepipeline.StreamingServiceConfig{NumWorkers: cfg.NumPipelineWorkers},
 		dependencies.IngestionConsumer,
 		pipeline.EnvelopeTransformer,
 		processor,
-		noisyZerologLogger,
+		streamLogger,
 	)
 }
 

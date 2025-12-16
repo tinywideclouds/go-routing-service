@@ -21,7 +21,6 @@ import (
 
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog" // Required for interoperability with some libs DO NOT REMOVE
 
 	"github.com/tinywideclouds/go-routing-service/internal/app"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
@@ -381,7 +380,7 @@ func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *
 	// This external library expects a zerolog.Logger. We pass zerolog.Nop()
 	// as our service-wide logger is slog.
 	return messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(subConfig.Name), psClient, zerolog.Nop(),
+		messagepipeline.NewGooglePubsubConsumerDefaults(subConfig.Name), psClient, logger,
 	)
 }
 
@@ -410,7 +409,7 @@ func newFirestoreTokenFetcher(ctx context.Context, cfg *config.AppConfig, fsClie
 		ctx,
 		&cache.FirestoreConfig{ProjectID: cfg.ProjectID, CollectionName: "device-tokens"},
 		fsClient,
-		zerolog.Nop(),
+		logger,
 	)
 	if err != nil {
 		return nil, err
@@ -425,7 +424,7 @@ func newPushNotifier(cfg *config.AppConfig, psClient *pubsub.Client, logger *slo
 
 	// This external library also expects a zerolog.Logger. We pass Nop.
 	pushProducer, err := messagepipeline.NewGooglePubsubProducer(
-		messagepipeline.NewGooglePubsubProducerDefaults(cfg.PushNotificationsTopicID), psClient, zerolog.Nop(),
+		messagepipeline.NewGooglePubsubProducerDefaults(cfg.PushNotificationsTopicID), psClient, logger,
 	)
 	if err != nil {
 		return nil, err

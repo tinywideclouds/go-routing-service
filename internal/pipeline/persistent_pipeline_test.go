@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/illmade-knight/go-test/emulators"
-	"github.com/rs/zerolog"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -123,11 +121,10 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	ingestSubID := "ingress-sub-" + runID
 	createPubsubResources(t, ctx, psClient, projectID, ingressTopicID, ingestSubID)
 
-	noisyZerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	cfg := &config.AppConfig{NumPipelineWorkers: 1}
 	processor := pipeline.NewRoutingProcessor(deps, cfg, logger)
 	consumer, err := messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(ingestSubID), psClient, noisyZerologLogger,
+		messagepipeline.NewGooglePubsubConsumerDefaults(ingestSubID), psClient, logger,
 	)
 	require.NoError(t, err)
 
@@ -136,7 +133,7 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 		consumer,
 		pipeline.EnvelopeTransformer,
 		processor,
-		noisyZerologLogger,
+		logger,
 	)
 	require.NoError(t, err)
 

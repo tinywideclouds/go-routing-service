@@ -34,7 +34,6 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
-	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/internal/app"
@@ -371,7 +370,7 @@ func assembleTestDependencies(
 		return nil, fmt.Errorf("failed to create e2e ingress subscription: %w", err)
 	}
 	ingressConsumer, err := messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(ingressSubID), psClient, zerolog.Nop(),
+		messagepipeline.NewGooglePubsubConsumerDefaults(ingressSubID), psClient, logger,
 	)
 	if err != nil {
 		return nil, err
