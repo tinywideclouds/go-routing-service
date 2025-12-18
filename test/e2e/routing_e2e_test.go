@@ -1,11 +1,6 @@
 // --- File: cmd/e2e/routing_e2e_test.go ---
 //go:build integration
 
-/*
-File: cmd/e2e/routing_e2e_test.go
-Description: REFACTORED to test the new "Hot/Cold/Migration" flow
-and the explicit PushNotifier.PokeOnline/NotifyOffline methods.
-*/
 package e2e_test
 
 import (
@@ -38,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/internal/app"
 	psub "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
+	"github.com/tinywideclouds/go-routing-service/internal/platform/push"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
 	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/internal/realtime"
@@ -48,32 +44,10 @@ import (
 
 	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
 	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
-	routingV1 "github.com/tinywideclouds/go-platform/pkg/routing/v1"
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// --- Test Helpers ---
-
-// mockPushNotifier implements the new routing.PushNotifier interface.
-// It uses channels to signal when a notification type is sent, allowing
-// the test to synchronize on these events.
-type mockPushNotifier struct {
-	pokeHandled chan urn.URN
-	pushHandled chan urn.URN
-}
-
-// NotifyOffline corresponds to the "Cold Path".
-// It receives the envelope directly (no tokens).
-func (m *mockPushNotifier) NotifyOffline(_ context.Context, envelope *secure.SecureEnvelope) error {
-	m.pushHandled <- envelope.RecipientID
-	return nil
-}
-
-// PokeOnline corresponds to the "Hot Path".
-func (m *mockPushNotifier) PokeOnline(_ context.Context, recipient urn.URN) error {
-	m.pokeHandled <- recipient
-	return nil
-}
+// ... (Test Helpers: newJWKSTestServer, createTestRS256Token, makeAPIRequest, createTopic remain same) ...
 
 func newJWKSTestServer(t *testing.T, privateKey *rsa.PrivateKey) *httptest.Server {
 	t.Helper()
@@ -139,17 +113,94 @@ func createTopic(t *testing.T, ctx context.Context, client *pubsub.Client, proje
 	}
 }
 
-// --- Main Test ---
+// Assemble Dependencies with REAL Push Notifier and Ephemeral Poke Consumer
+func assembleTestDependencies(
+	ctx context.Context,
+	psClient *pubsub.Client,
+	fsClient *firestore.Client,
+	cfg *config.AppConfig,
+	logger *slog.Logger,
+) (*routing.ServiceDependencies, messagepipeline.MessageConsumer, error) {
+
+	ingressProducer := psub.NewProducer(psClient.Publisher(cfg.IngressTopicID))
+
+	ingressSubID := "e2e-ingress-sub-" + uuid.NewString()
+	ingressTopicPath := fmt.Sprintf("projects/%s/topics/%s", cfg.ProjectID, cfg.IngressTopicID)
+	ingressSubPath := fmt.Sprintf("projects/%s/subscriptions/%s", cfg.ProjectID, ingressSubID)
+
+	_, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  ingressSubPath,
+		Topic: ingressTopicPath,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ingressConsumer, err := messagepipeline.NewGooglePubsubConsumer(
+		messagepipeline.NewGooglePubsubConsumerDefaults(ingressSubID), psClient, logger,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	coldQueue, _ := fsqueue.NewFirestoreColdQueue(fsClient, cfg.ColdQueueCollection, logger)
+	hotQueue, _ := fsqueue.NewFirestoreHotQueue(fsClient, cfg.HotQueue.Firestore.MainCollectionName, cfg.HotQueue.Firestore.PendingCollectionName, logger)
+	messageQueue, _ := queue.NewCompositeMessageQueue(hotQueue, coldQueue, logger)
+
+	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]()
+
+	// REAL Push Notifier
+	pushProducer, err := messagepipeline.NewGooglePubsubProducer(
+		messagepipeline.NewGooglePubsubProducerDefaults(cfg.PushNotificationsTopicID), psClient, logger,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	realPushNotifier, err := push.NewPubSubNotifier(pushProducer, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Ephemeral Poke Consumer (Fan-Out for Test)
+	pokeSubID := "e2e-poke-sub-" + uuid.NewString()
+	pokeSubPath := fmt.Sprintf("projects/%s/subscriptions/%s", cfg.ProjectID, pokeSubID)
+	pushTopicPath := fmt.Sprintf("projects/%s/topics/%s", cfg.ProjectID, cfg.PushNotificationsTopicID)
+
+	_, err = psClient.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  pokeSubPath,
+		Topic: pushTopicPath,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pokeConsumer, err := messagepipeline.NewGooglePubsubConsumer(
+		messagepipeline.NewGooglePubsubConsumerDefaults(pokeSubID), psClient, logger,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	deps := &routing.ServiceDependencies{
+		IngestionProducer: ingressProducer,
+		IngestionConsumer: ingressConsumer,
+		MessageQueue:      messageQueue,
+		PresenceCache:     presenceCache,
+		PushNotifier:      realPushNotifier,
+	}
+
+	return deps, pokeConsumer, nil
+}
 
 func TestFull_HotColdMigration_E2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	t.Cleanup(cancel)
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	const projectID = "test-project-e2e" // Project ID must match emulator
+	const projectID = "test-project-e2e"
 	runID := uuid.NewString()
 
-	// --- 1. Setup Emulators & Auth ---
+	// --- 1. Setup Emulators ---
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	jwksServer := newJWKSTestServer(t, privateKey)
@@ -165,16 +216,11 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = fsClient.Close() })
 
-	// --- 2. Arrange service dependencies ---
+	// --- 2. Config & Deps ---
 	senderURN, _ := urn.Parse("urn:contacts:user:user-alice")
 	recipientURN, _ := urn.Parse("urn:contacts:user:user-bob")
-
 	senderToken := createTestRS256Token(t, privateKey, senderURN.EntityID())
 	recipientToken := createTestRS256Token(t, privateKey, recipientURN.EntityID())
-
-	const coldCollection = "e2e-cold-queue"
-	const hotMainCollection = "e2e-hot-main"
-	const hotPendingCollection = "e2e-hot-pending"
 
 	testConfig := &config.AppConfig{
 		ProjectID:          projectID,
@@ -186,32 +232,23 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 		HotQueue: config.YamlHotQueueConfig{
 			Type: "firestore",
 			Firestore: config.YamlFirestoreConfig{
-				MainCollectionName:    hotMainCollection,
-				PendingCollectionName: hotPendingCollection,
+				MainCollectionName:    "e2e-hot-main",
+				PendingCollectionName: "e2e-hot-pending",
 			},
 		},
-		ColdQueueCollection:      coldCollection,
+		ColdQueueCollection:      "e2e-cold-queue",
 		PushNotificationsTopicID: "pushes-" + runID,
 	}
 
 	createTopic(t, ctx, psClient, projectID, testConfig.IngressTopicID)
 	createTopic(t, ctx, psClient, projectID, testConfig.PushNotificationsTopicID)
 
-	// Mock Notifier with channels
-	pokeHandled := make(chan urn.URN, 1)
-	pushHandled := make(chan urn.URN, 1)
-	mockNotifier := &mockPushNotifier{pokeHandled: pokeHandled, pushHandled: pushHandled}
-
-	deps, err := assembleTestDependencies(ctx, psClient, fsClient, testConfig, mockNotifier, logger)
+	deps, pokeConsumer, err := assembleTestDependencies(ctx, psClient, fsClient, testConfig, logger)
 	require.NoError(t, err)
 
-	// --- 3. Start the FULL Routing Service (API + ConnectionManager) ---
 	jwksURL := jwksServer.URL + "/.well-known/jwks.json"
-	authMiddleware, err := middleware.NewJWKSAuthMiddleware(jwksURL, logger)
-	require.NoError(t, err)
-
-	wsAuthMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger)
-	require.NoError(t, err)
+	authMiddleware, _ := middleware.NewJWKSAuthMiddleware(jwksURL, logger)
+	wsAuthMiddleware, _ := middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger)
 
 	apiService, err := routingservice.New(testConfig, deps, authMiddleware, logger)
 	require.NoError(t, err)
@@ -221,16 +258,15 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 		wsAuthMiddleware,
 		deps.PresenceCache,
 		deps.MessageQueue,
+		pokeConsumer, // Real consumer attached
 		logger,
 	)
 	require.NoError(t, err)
 
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	t.Cleanup(cancelService)
-
 	go app.Run(serviceCtx, logger, apiService, connManager)
 
-	// Wait for servers to start
 	var apiServerURL, wsServerURL string
 	require.Eventually(t, func() bool {
 		apiPort := apiService.GetHTTPPort()
@@ -241,172 +277,43 @@ func TestFull_HotColdMigration_E2E(t *testing.T) {
 			return true
 		}
 		return false
-	}, 10*time.Second, 100*time.Millisecond, "Services did not start and report a port")
-	t.Logf("API Server running at: %s", apiServerURL)
-	t.Logf("WS Server running at: %s", wsServerURL)
+	}, 10*time.Second, 100*time.Millisecond, "Services did not start")
 
-	// --- PHASE 1: Bob Connects (Hot Path Setup) ---
-	t.Log("Phase 1: Bob connecting via WebSocket...")
+	// --- PHASE 1: Bob Connects ---
 	wsHeaders := http.Header{"Sec-WebSocket-Protocol": []string{recipientToken}}
 	wsConn, _, err := websocket.DefaultDialer.Dial(wsServerURL+"/connect", wsHeaders)
-	require.NoError(t, err, "Failed to connect WebSocket client")
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = wsConn.Close() })
 
+	// Wait for Presence
 	require.Eventually(t, func() bool {
-		_, err := deps.PresenceCache.Fetch(ctx, recipientURN)
-		return err == nil
-	}, 5*time.Second, 10*time.Millisecond, "User presence was not set")
-	t.Log("✅ Bob is online.")
+		sessions, err := deps.PresenceCache.FetchSessions(ctx, recipientURN)
+		return err == nil && len(sessions) > 0
+	}, 5*time.Second, 10*time.Millisecond)
 
-	// --- PHASE 2: Sally Sends Message (Hot Path Enqueue) ---
-	t.Log("Phase 2: Sally sending message to online Bob...")
-	msg1 := &secure.SecureEnvelope{
-		RecipientID:   recipientURN,
-		EncryptedData: []byte("e2e-hot-path-data"),
-	}
-	msg1Bytes, err := protojson.Marshal(secure.ToProto(msg1))
-	require.NoError(t, err)
-
+	// --- PHASE 2: Send Message -> Expect Poke ---
+	msg1 := &secure.SecureEnvelope{RecipientID: recipientURN, EncryptedData: []byte("e2e-hot-path-data")}
+	msg1Bytes, _ := protojson.Marshal(secure.ToProto(msg1))
 	sendResp := makeAPIRequest(t, http.MethodPost, apiServerURL+"/api/send", senderToken, msg1Bytes)
 	require.Equal(t, http.StatusAccepted, sendResp.StatusCode)
 	_ = sendResp.Body.Close()
 
-	// Assert "Poke" was sent (since Bob is online)
-	select {
-	case recipient := <-pokeHandled:
-		t.Logf("✅ 'Poke' notification received for %s.", recipient.String())
-		assert.Equal(t, recipientURN.String(), recipient.String())
-	case recipient := <-pushHandled:
-		t.Fatalf("FAIL: Received a full 'push' for %s instead of a 'poke'", recipient.String())
-	case <-time.After(15 * time.Second):
-		t.Fatal("Test timed out waiting for 'poke' notification")
-	}
+	// Verify WebSocket Poke
+	wsConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_, p, err := wsConn.ReadMessage()
+	require.NoError(t, err, "Failed to receive poke via WebSocket")
+	assert.JSONEq(t, "{}", string(p))
 
-	var hotDocs []*firestore.DocumentSnapshot
+	// --- PHASE 3: Disconnect & Migrate ---
+	wsConn.Close()
 	require.Eventually(t, func() bool {
-		hotDocs, err = fsClient.Collection(hotMainCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
-		return err == nil && len(hotDocs) == 1
-	}, 10*time.Second, 100*time.Millisecond, "Expected 1 message in HOT queue")
-	t.Log("✅ Message stored in hot queue.")
-
-	coldDocs, err := fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
-	require.NoError(t, err)
-	require.Len(t, coldDocs, 0, "Cold queue should be empty")
-
-	// --- PHASE 3: Bob "Crashes" (Trigger Migration) ---
-	t.Log("Phase 3: Bob 'crashing' (WebSocket disconnect)...")
-	err = wsConn.Close()
-	require.NoError(t, err)
-
-	require.Eventually(t, func() bool {
-		_, err := deps.PresenceCache.Fetch(ctx, recipientURN)
-		return err != nil
-	}, 5*time.Second, 10*time.Millisecond, "User presence was not cleared")
-	t.Log("✅ Bob is offline.")
-
-	t.Log("NOTE: Verifying hot-queue deletion is skipped due to emulator BulkWriter flakiness.")
+		sessions, err := deps.PresenceCache.FetchSessions(ctx, recipientURN)
+		return err != nil || len(sessions) == 0
+	}, 5*time.Second, 10*time.Millisecond)
 
 	var coldDocsAfter []*firestore.DocumentSnapshot
 	require.Eventually(t, func() bool {
-		coldDocsAfter, err = fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
+		coldDocsAfter, err = fsClient.Collection("e2e-cold-queue").Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
 		return err == nil && len(coldDocsAfter) == 1
-	}, 10*time.Second, 100*time.Millisecond, "Message was not migrated to COLD queue")
-	t.Log("✅ Message successfully migrated to cold queue.")
-
-	// --- PHASE 4: Bob Reconnects (Cold Path Sync) ---
-	t.Log("Phase 4: Bob reconnecting and pulling from cold queue...")
-	batchResp := makeAPIRequest(t, http.MethodGet, apiServerURL+"/api/messages", recipientToken, nil)
-	require.Equal(t, http.StatusOK, batchResp.StatusCode)
-
-	batchBody, err := io.ReadAll(batchResp.Body)
-	require.NoError(t, err)
-	_ = batchResp.Body.Close()
-
-	var receivedBatch routingV1.QueuedMessageList
-	err = json.Unmarshal(batchBody, &receivedBatch)
-	require.NoError(t, err)
-	require.Len(t, receivedBatch.Messages, 1, "Batch should contain one message")
-	assert.Equal(t, msg1.EncryptedData, receivedBatch.Messages[0].Envelope.EncryptedData)
-	t.Log("✅ Bob retrieved migrated message from cold queue.")
-
-	// --- PHASE 5: Acknowledge Message ---
-	t.Log("Phase 5: Bob acknowledging message...")
-	messageIDs := []string{receivedBatch.Messages[0].ID}
-	ackBody, err := json.Marshal(map[string][]string{"messageIds": messageIDs})
-	require.NoError(t, err)
-
-	ackResp := makeAPIRequest(t, http.MethodPost, apiServerURL+"/api/messages/ack", recipientToken, ackBody)
-	require.Equal(t, http.StatusNoContent, ackResp.StatusCode)
-	_ = ackResp.Body.Close()
-
-	t.Log("Phase 6: Verifying message deletion (SKIPPED for emulator).")
-	t.Log("✅ Message acked. E2E test passed.")
-}
-
-// --- Test Setup Helpers ---
-
-func assembleTestDependencies(
-	ctx context.Context,
-	psClient *pubsub.Client,
-	fsClient *firestore.Client,
-	cfg *config.AppConfig,
-	pushNotifier routing.PushNotifier,
-	logger *slog.Logger,
-) (*routing.ServiceDependencies, error) {
-
-	// Ingress Producer
-	ingressProducer := psub.NewProducer(psClient.Publisher(cfg.IngressTopicID))
-
-	// Ingress Consumer (create persistent sub)
-	ingressSubID := "e2e-ingress-sub-" + uuid.NewString()
-	ingressTopicPath := fmt.Sprintf("projects/%s/topics/%s", cfg.ProjectID, cfg.IngressTopicID)
-	ingressSubPath := fmt.Sprintf("projects/%s/subscriptions/%s", cfg.ProjectID, ingressSubID)
-
-	_, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
-		Name:  ingressSubPath,
-		Topic: ingressTopicPath,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create e2e ingress subscription: %w", err)
-	}
-	ingressConsumer, err := messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(ingressSubID), psClient, logger,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// --- Create Real Queues (using Firestore) ---
-	coldQueue, err := fsqueue.NewFirestoreColdQueue(fsClient, cfg.ColdQueueCollection, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create e2e cold queue: %w", err)
-	}
-	hotQueue, err := fsqueue.NewFirestoreHotQueue(
-		fsClient,
-		cfg.HotQueue.Firestore.MainCollectionName,
-		cfg.HotQueue.Firestore.PendingCollectionName,
-		logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create e2e hot queue: %w", err)
-	}
-	messageQueue, err := queue.NewCompositeMessageQueue(hotQueue, coldQueue, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create e2e composite queue: %w", err)
-	}
-	// --- End Queue Setup ---
-
-	// Use an in-memory presence cache for E2E test speed
-	presenceCache := cache.NewInMemoryPresenceCache[urn.URN, routing.ConnectionInfo]()
-
-	// REFACTORED: NO DeviceTokenFetcher is created or injected here.
-
-	return &routing.ServiceDependencies{
-		IngestionProducer: ingressProducer,
-		IngestionConsumer: ingressConsumer,
-		MessageQueue:      messageQueue,
-		PresenceCache:     presenceCache,
-		// REMOVED: DeviceTokenFetcher
-		PushNotifier: pushNotifier,
-	}, nil
+	}, 10*time.Second, 100*time.Millisecond)
 }

@@ -1,4 +1,3 @@
-// --- File: internal/pipeline/routing_processor.go ---
 package pipeline
 
 import (
@@ -24,9 +23,10 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 			"priority", envelope.Priority,
 		)
 
-		// 1. Check Presence
-		_, err := deps.PresenceCache.Fetch(ctx, recipientURN)
-		isOnline := (err == nil)
+		// 1. Check Presence (Multi-Session Aware)
+		// We verify if ANY session exists for the user.
+		sessions, err := deps.PresenceCache.FetchSessions(ctx, recipientURN)
+		isOnline := (err == nil && len(sessions) > 0)
 
 		// --- EXPRESS LANE (High Priority) ---
 		if envelope.Priority >= priorityHigh {
@@ -37,12 +37,12 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 				return fmt.Errorf("failed to enqueue High Priority message: %w", err)
 			}
 
+			// In Express Lane, we notify regardless, but tailor the notification type.
 			if isOnline {
 				procLogger.Debug("Express Lane: User is online, sending poke")
 				_ = deps.PushNotifier.PokeOnline(ctx, recipientURN)
 			} else {
 				procLogger.Debug("Express Lane: User is offline, sending push")
-				// REFACTORED: Direct call, no token fetching
 				_ = deps.PushNotifier.NotifyOffline(ctx, envelope)
 			}
 			return nil
@@ -54,6 +54,7 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 			if err := deps.MessageQueue.EnqueueHot(ctx, envelope); err != nil {
 				return fmt.Errorf("failed to enqueue message: %w", err)
 			}
+			// This poke triggers the "Fan-Out" in PubSub, which reaches the ConnectionManager.
 			_ = deps.PushNotifier.PokeOnline(ctx, recipientURN)
 			return nil
 		}
@@ -67,10 +68,8 @@ func NewRoutingProcessor(deps *routing.ServiceDependencies, cfg *config.AppConfi
 		// Offline Cold Path
 		procLogger.Info("User is offline. Routing message to COLD queue.")
 
-		// REFACTORED: Direct call
 		if err := deps.PushNotifier.NotifyOffline(ctx, envelope); err != nil {
 			procLogger.Warn("Failed to send offline notification", "err", err)
-			// Non-critical error, continue to enqueue
 		}
 
 		if err := deps.MessageQueue.EnqueueCold(ctx, envelope); err != nil {

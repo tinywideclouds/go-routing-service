@@ -1,11 +1,12 @@
 /*
 File: internal/realtime/connectionmanager.go
-Description: Manages WebSocket connections with "Handle is King" resolution.
+Description: Manages WebSocket connections with multi-device support and a Pub/Sub listener for real-time "Pokes".
 */
 package realtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
+	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/tinywideclouds/go-routing-service/internal/queue"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
 
@@ -31,11 +33,25 @@ type ConnectionManager struct {
 	upgrader      websocket.Upgrader
 	presenceCache cache.PresenceCache[urn.URN, routing.ConnectionInfo]
 	messageQueue  queue.MessageQueue
-	connections   sync.Map // map[string]*websocket.Conn
-	logger        *slog.Logger
-	instanceID    string
-	listener      net.Listener
-	port          string
+
+	// Consumer for receiving "Poke" events from the Routing Processor
+	pokeConsumer messagepipeline.MessageConsumer
+
+	// Efficient Session Index: Map[UserURN] -> Map[SessionID] -> Connection
+	sessionMu    sync.RWMutex
+	userSessions map[string]map[string]*websocket.Conn
+
+	logger     *slog.Logger
+	instanceID string
+	listener   net.Listener
+	port       string
+	wg         sync.WaitGroup
+}
+
+// pokePayload matches the JSON structure sent by the RoutingProcessor to Pub/Sub.
+type pokePayload struct {
+	Type      string `json:"type"`
+	Recipient string `json:"recipient"`
 }
 
 // NewConnectionManager creates and wires up a new WebSocket connection manager.
@@ -44,6 +60,7 @@ func NewConnectionManager(
 	authMiddleware func(http.Handler) http.Handler,
 	presenceCache cache.PresenceCache[urn.URN, routing.ConnectionInfo],
 	messageQueue queue.MessageQueue,
+	pokeConsumer messagepipeline.MessageConsumer,
 	logger *slog.Logger,
 ) (*ConnectionManager, error) {
 
@@ -54,14 +71,13 @@ func NewConnectionManager(
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
-			CheckOrigin: func(r *http.Request) bool {
-				cmLogger.Debug("WebSocket CheckOrigin", "origin", r.Header.Get("Origin"))
-				return true
-			},
+			// In production, CheckOrigin should be stricter or configurable.
+			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		presenceCache: presenceCache,
 		messageQueue:  messageQueue,
-		connections:   sync.Map{},
+		pokeConsumer:  pokeConsumer,
+		userSessions:  make(map[string]map[string]*websocket.Conn),
 		logger:        cmLogger,
 		instanceID:    instanceID,
 		port:          port,
@@ -76,13 +92,27 @@ func NewConnectionManager(
 	return cm, nil
 }
 
-// Start runs the HTTP server for WebSocket connections.
+// Start runs the HTTP server for WebSockets and starts the Poke Consumer loop.
 func (cm *ConnectionManager) Start(ctx context.Context) error {
 	addr := cm.port
 	if !strings.HasPrefix(addr, ":") {
 		addr = ":" + addr
 	}
 
+	// 1. Start the Poke Consumer (The Bridge)
+	if cm.pokeConsumer != nil {
+		cm.logger.Info("Starting Poke Consumer...")
+		if err := cm.pokeConsumer.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start poke consumer: %w", err)
+		}
+
+		cm.wg.Add(1)
+		go cm.processPokes(ctx)
+	} else {
+		cm.logger.Warn("⚠️ No PokeConsumer configured. Real-time updates will NOT work.")
+	}
+
+	// 2. Start WebSocket Server
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		cm.logger.Error("WebSocket server failed to listen", "addr", addr, "err", err)
@@ -99,23 +129,95 @@ func (cm *ConnectionManager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown gracefully stops the HTTP server.
+// processPokes consumes messages from the pipeline channel.
+func (cm *ConnectionManager) processPokes(ctx context.Context) {
+	defer cm.wg.Done()
+	cm.logger.Info("Poke Processing Loop Started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			cm.logger.Info("Context cancelled, stopping poke processor")
+			return
+		case msg, ok := <-cm.pokeConsumer.Messages():
+			if !ok {
+				cm.logger.Info("Poke consumer channel closed")
+				return
+			}
+			cm.handlePoke(&msg)
+			msg.Ack() // Always Ack pokes; they are fire-and-forget signals.
+		}
+	}
+}
+
+// handlePoke processes a single message payload from Pub/Sub.
+func (cm *ConnectionManager) handlePoke(msg *messagepipeline.Message) {
+	var message messagepipeline.MessageData
+	if err := json.Unmarshal(msg.Payload, &message); err != nil {
+		cm.logger.Warn("Failed to unmarshalmessage", "err", err)
+		return
+	}
+	var poke pokePayload
+	if err := json.Unmarshal(message.Payload, &poke); err != nil {
+		cm.logger.Warn("Failed to unmarshal poke payload", "err", err)
+		return
+	}
+
+	if poke.Type != "poke" {
+		return
+	}
+
+	targetURN := poke.Recipient
+	cm.logger.Debug("🔔 Received Poke Signal", "recipient", targetURN)
+
+	// 1. Look up active sessions for this user in our local index
+	cm.sessionMu.RLock()
+	sessions, found := cm.userSessions[targetURN]
+	if !found || len(sessions) == 0 {
+		cm.sessionMu.RUnlock()
+		// This is normal; the user might be connected to a different server instance.
+		return
+	}
+
+	// Snapshot the connections to minimize lock time
+	activeConns := make([]*websocket.Conn, 0, len(sessions))
+	for _, conn := range sessions {
+		activeConns = append(activeConns, conn)
+	}
+	cm.sessionMu.RUnlock()
+
+	// 2. Broadcast the Empty Signal to all user devices connected to THIS instance
+	signal := []byte("{}")
+	for _, conn := range activeConns {
+		// Note: We ignore write errors here; strict connection management happens in the read loop.
+		if err := conn.WriteMessage(websocket.TextMessage, signal); err != nil {
+			cm.logger.Warn("Failed to send poke to socket", "err", err)
+		}
+	}
+}
+
+// Shutdown gracefully stops the HTTP server and the Consumer.
 func (cm *ConnectionManager) Shutdown(ctx context.Context) error {
 	cm.logger.Info("Shutting down WebSocket service...")
 	var finalErr error
+
+	// Stop Consumer first to drain messages
+	if cm.pokeConsumer != nil {
+		if err := cm.pokeConsumer.Stop(ctx); err != nil {
+			cm.logger.Error("Poke Consumer stop failed", "err", err)
+		}
+		cm.wg.Wait()
+	}
 
 	if err := cm.server.Shutdown(ctx); err != nil {
 		cm.logger.Error("WebSocket server shutdown failed", "err", err)
 		finalErr = err
 	}
-
 	if cm.listener != nil {
 		if err := cm.listener.Close(); err != nil {
-			cm.logger.Error("WebSocket listener close failed", "err", err)
-			finalErr = err
+			cm.logger.Debug("WebSocket listener close", "err", err)
 		}
 	}
-
 	cm.logger.Info("WebSocket service shut down.")
 	return finalErr
 }
@@ -133,33 +235,28 @@ func (cm *ConnectionManager) GetHTTPPort() string {
 	return addr[port:]
 }
 
-// connectHandler upgrades a new HTTP request to a WebSocket.
+// connectHandler handles the WebSocket upgrade and lifecycle.
 func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Request) {
-	// REFACTOR: Use "Handle is King" resolution for WebSockets too.
 	var userURN urn.URN
 	var parseErr error
-
-	cm.logger.Info("called connection handler")
 
 	if handle, ok := middleware.GetUserHandleFromContext(r.Context()); ok && handle != "" {
 		userURN, parseErr = urn.Parse(handle)
 	} else if userID, ok := middleware.GetUserIDFromContext(r.Context()); ok && userID != "" {
 		userURN, parseErr = urn.Parse(userID)
 	} else {
-		cm.logger.Error("connectHandler: No identity found in context")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	if parseErr != nil {
-		cm.logger.Error("Failed to parse user URN", "err", parseErr)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	log := cm.logger.With("user", userURN.String())
+	// Generate a unique Session ID for this specific connection
+	sessionID := uuid.NewString()
 
-	// WebSocket Auth Handshake
 	protocol := r.Header.Get("Sec-WebSocket-Protocol")
 	headers := http.Header{}
 	if protocol != "" {
@@ -168,20 +265,21 @@ func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Reque
 
 	conn, err := cm.upgrader.Upgrade(w, r, headers)
 	if err != nil {
-		log.Error("Failed to upgrade connection", "err", err)
+		cm.logger.Error("Failed to upgrade connection", "err", err)
 		return
 	}
 
-	defer func() {
-		conn.Close()
-	}()
+	defer conn.Close()
 
-	// Register using the Resolved URN (Handle)
-	cm.add(userURN, conn)
-	defer cm.Remove(userURN)
+	// Register Session
+	cm.add(userURN, sessionID, conn)
 
-	log.Info("User connected via WebSocket.")
+	// Defer Removal (Trigger migration only if last session)
+	defer cm.Remove(userURN, sessionID)
 
+	cm.logger.Info("User connected via WebSocket.", "user", userURN.String(), "session", sessionID)
+
+	// Read Pump (Keeps connection alive)
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			break
@@ -189,36 +287,61 @@ func (cm *ConnectionManager) connectHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (cm *ConnectionManager) add(userURN urn.URN, conn *websocket.Conn) {
-	log := cm.logger.With("user", userURN.String())
-	cm.connections.Store(userURN.String(), conn)
+// add registers a connection in the 2-level map and the distributed cache.
+func (cm *ConnectionManager) add(userURN urn.URN, sessionID string, conn *websocket.Conn) {
+	userKey := userURN.String()
+
+	// Add to Local Index
+	cm.sessionMu.Lock()
+	if cm.userSessions[userKey] == nil {
+		cm.userSessions[userKey] = make(map[string]*websocket.Conn)
+	}
+	cm.userSessions[userKey][sessionID] = conn
+	cm.sessionMu.Unlock()
 
 	info := routing.ConnectionInfo{
 		ServerInstanceID: cm.instanceID,
 		ConnectedAt:      time.Now().Unix(),
 	}
 
-	log.Debug("Setting user presence in cache")
-	if err := cm.presenceCache.Set(context.Background(), userURN, info); err != nil {
-		log.Error("Failed to set user presence in cache", "err", err)
+	// Add to Distributed Cache
+	if err := cm.presenceCache.AddSession(context.Background(), userURN, sessionID, info); err != nil {
+		cm.logger.Error("Failed to add session to presence cache", "err", err)
 	}
 }
 
-func (cm *ConnectionManager) Remove(userURN urn.URN) {
-	log := cm.logger.With("user", userURN.String())
-	cm.connections.Delete(userURN.String())
+// Remove handles cleanup and conditional migration.
+func (cm *ConnectionManager) Remove(userURN urn.URN, sessionID string) {
+	userKey := userURN.String()
 
-	log.Debug("Deleting user presence from cache")
-	if err := cm.presenceCache.Delete(context.Background(), userURN); err != nil {
-		log.Error("Failed to delete user presence from cache", "err", err)
+	// 1. Remove from Local Index
+	cm.sessionMu.Lock()
+	if sessions, exists := cm.userSessions[userKey]; exists {
+		delete(sessions, sessionID)
+		if len(sessions) == 0 {
+			delete(cm.userSessions, userKey)
+		}
+	}
+	cm.sessionMu.Unlock()
+
+	// 2. Remove from Distributed Cache (Atomic Check)
+	remaining, err := cm.presenceCache.RemoveSession(context.Background(), userURN, sessionID)
+	if err != nil {
+		cm.logger.Error("Failed to remove session from presence cache", "err", err)
+		return
 	}
 
-	log.Info("User disconnected. Triggering hot-to-cold queue migration.")
+	// If other sessions exist, DO NOT migrate.
+	if remaining > 0 {
+		return
+	}
+
+	// 3. Last Session Out -> Migrate Hot to Cold
+	cm.logger.Info("Last device disconnected. Triggering hot-to-cold queue migration.", "user", userKey)
 	migrationCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := cm.messageQueue.MigrateHotToCold(migrationCtx, userURN); err != nil {
-		log.Error("CRITICAL: Hot-to-cold migration failed", "err", err)
+		cm.logger.Error("CRITICAL: Hot-to-cold migration failed", "err", err)
 	}
-	log.Info("User disconnected.")
 }

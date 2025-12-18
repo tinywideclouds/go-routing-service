@@ -1,29 +1,29 @@
 /*
 File: cmd/runroutingservice/runroutingservice.go
-Description: Main entrypoint for the routing service.
-Handles config loading, dependency injection, and starting the application.
+Description: Main entrypoint. Wires up the Ephemeral Poke Subscription for the "Fan-Out" architecture.
 */
 package main
 
 import (
 	"context"
 	_ "embed"
-	"flag" // <--- 1. Import flag
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"cloud.google.com/go/firestore"
 	"cloud.google.com/go/pubsub/v2"
 	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
+	"github.com/google/uuid"
 	"github.com/illmade-knight/go-dataflow/pkg/cache"
-
 	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/redis/go-redis/v9"
-
+	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
+	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 	"github.com/tinywideclouds/go-routing-service/internal/app"
-	"github.com/tinywideclouds/go-routing-service/internal/platform/persistence"
 	psub "github.com/tinywideclouds/go-routing-service/internal/platform/pubsub"
 	"github.com/tinywideclouds/go-routing-service/internal/platform/push"
 	fsqueue "github.com/tinywideclouds/go-routing-service/internal/platform/queue"
@@ -35,16 +35,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
-
-	"github.com/tinywideclouds/go-microservice-base/pkg/middleware"
-	urn "github.com/tinywideclouds/go-platform/pkg/net/v1"
 )
 
 //go:embed config.yaml
 var configFile []byte
 
 func main() {
-	// --- 1. Define Flags ---
 	apiFlag := flag.Bool("api", false, "Start the API Service")
 	wsFlag := flag.Bool("ws", false, "Start the WebSocket Service")
 	flag.Parse()
@@ -52,220 +48,206 @@ func main() {
 	runAPI := *apiFlag
 	runWS := *wsFlag
 
-	// If neither flag is set, default to RUNNING EVERYTHING (Local Dev Mode)
 	if !runAPI && !runWS {
 		runAPI = true
 		runWS = true
 	}
 
-	// --- 2. Setup structured logging (slog) ---
+	// --- Setup Logger ---
 	var logLevel slog.Level
 	switch os.Getenv("LOG_LEVEL") {
 	case "debug", "DEBUG":
 		logLevel = slog.LevelDebug
-	case "info", "INFO":
-		logLevel = slog.LevelInfo
-	case "warn", "WARN":
-		logLevel = slog.LevelWarn
-	case "error", "ERROR":
-		logLevel = slog.LevelError
 	default:
 		logLevel = slog.LevelInfo
 	}
-
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
 	})).With("service", "go-routing-service")
-
 	slog.SetDefault(logger)
 
-	logger.Info("Service startup initialized", "run_api", runAPI, "run_ws", runWS)
-
-	// --- 3. Load Configuration (Stage 0: Unmarshal) ---
+	// --- Load Config ---
 	var yamlCfg config.YamlConfig
-	err := yaml.Unmarshal(configFile, &yamlCfg)
-	if err != nil {
-		logger.Error("Failed to unmarshal embedded yaml config", "err", err)
+	if err := yaml.Unmarshal(configFile, &yamlCfg); err != nil {
+		logger.Error("Failed to unmarshal config", "err", err)
 		os.Exit(1)
 	}
-
-	// --- 4. Build Base Config (Stage 1: YAML to Base Struct) ---
 	baseCfg, err := config.NewConfigFromYaml(&yamlCfg, logger)
 	if err != nil {
-		logger.Error("Failed to build base configuration from YAML", "err", err)
+		logger.Error("Failed to build base config", "err", err)
 		os.Exit(1)
 	}
-
-	// --- 5. Apply Overrides & Validate (Stage 2: Env Vars) ---
 	cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 	if err != nil {
-		logger.Error("Failed to finalize configuration with environment overrides", "err", err)
+		logger.Error("Config validation failed", "err", err)
 		os.Exit(1)
 	}
 
-	// --- 5.5. Smart Port Detection (Cloud Run Compatibility) ---
-	// If the PORT environment variable is set (Cloud Run), automatically assign it
-	// to the active service.
+	// Port Override for Cloud Run
 	if port := os.Getenv("PORT"); port != "" {
 		if runAPI {
 			cfg.APIPort = port
-			logger.Info("Cloud Run environment detected: Overriding API_PORT", "port", port)
 		} else if runWS {
-			// Only override WS port if API is NOT running (or if logic allows)
-			// In split mode, this logic holds: runAPI is false, so we set WS port.
 			cfg.WebSocketPort = port
-			logger.Info("Cloud Run environment detected: Overriding WEBSOCKET_PORT", "port", port)
 		}
 	}
 
-	// Late Validation: Ensure the active service has a port
-	if runAPI && cfg.APIPort == "" {
-		logger.Error("Startup failed: API_PORT is not set")
-		os.Exit(1)
-	}
-	if runWS && cfg.WebSocketPort == "" {
-		logger.Error("Startup failed: WEBSOCKET_PORT is not set")
-		os.Exit(1)
-	}
-
-	// Convert topic/sub IDs to full GCP resource names
+	// Ensure GCP Resource Names are fully qualified
 	cfg.IngressTopicID = convertPubsub(cfg.ProjectID, cfg.IngressTopicID, Pub)
 	cfg.IngressSubscriptionID = convertPubsub(cfg.ProjectID, cfg.IngressSubscriptionID, Sub)
 	cfg.IngressTopicDLQID = convertPubsub(cfg.ProjectID, cfg.IngressTopicDLQID, Pub)
+	cfg.PushNotificationsTopicID = convertPubsub(cfg.ProjectID, cfg.PushNotificationsTopicID, Pub)
 
-	// --- 6. Create dependencies ---
 	ctx := context.Background()
 
-	deps, err := newDependencies(ctx, cfg, logger)
+	// --- Create Core Dependencies ---
+	// We return psClient to allow main() to manage the ephemeral subscription.
+	deps, psClient, err := newDependencies(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("Failed to initialize dependencies", "err", err)
 		os.Exit(1)
 	}
 
-	// --- 7. Create Authentication Middlewares ---
-	// 7a. Discover the JWKS URL once
+	// --- Auth Middleware ---
 	jwksURL, err := middleware.DiscoverAndValidateJWTConfig(cfg.IdentityServiceURL, middleware.RSA256, logger)
 	if err != nil {
-		logger.Error("Failed to discover OIDC config", "err", err)
+		logger.Error("OIDC Discovery failed", "err", err)
 		os.Exit(1)
 	}
 
-	// 7b. Create the HTTP auth middleware (Needed only if API is running)
-	var httpAuthMiddleware func(http.Handler) http.Handler
+	var httpAuth func(http.Handler) http.Handler
 	if runAPI {
-		httpAuthMiddleware, err = middleware.NewJWKSAuthMiddleware(jwksURL, logger)
-		if err != nil {
-			logger.Error("Failed to initialize HTTP authentication middleware", "err", err)
+		if httpAuth, err = middleware.NewJWKSAuthMiddleware(jwksURL, logger); err != nil {
+			logger.Error("HTTP Auth init failed", "err", err)
 			os.Exit(1)
 		}
 	}
 
-	// 7c. Create the WebSocket auth middleware (Needed only if WS is running)
-	var wsAuthMiddleware func(http.Handler) http.Handler
+	var wsAuth func(http.Handler) http.Handler
 	if runWS {
-		wsAuthMiddleware, err = middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger)
-		if err != nil {
-			logger.Error("Failed to initialize WebSocket authentication middleware", "err", err)
+		if wsAuth, err = middleware.NewJWKSWebsocketAuthMiddleware(jwksURL, logger); err != nil {
+			logger.Error("WS Auth init failed", "err", err)
 			os.Exit(1)
 		}
 	}
 
-	// --- 8. Create the two main services conditionally ---
+	// --- Services ---
 	var apiService *routingservice.Wrapper
 	if runAPI {
-		apiService, err = routingservice.New(
-			cfg,
-			deps,
-			httpAuthMiddleware,
-			logger.With("component", "ApiService"),
-		)
+		apiService, err = routingservice.New(cfg, deps, httpAuth, logger.With("component", "ApiService"))
 		if err != nil {
-			logger.Error("Failed to create API service", "err", err)
+			logger.Error("API Service init failed", "err", err)
 			os.Exit(1)
 		}
 	}
 
 	var connManager *realtime.ConnectionManager
 	if runWS {
+		// --- POKE LISTENER SETUP (The Fan-Out) ---
+		// 1. Generate unique subscription ID for this instance
+		instanceID := uuid.NewString()
+		pokeSubID := fmt.Sprintf("poke-sub-%s", instanceID)
+		pokeSubName := convertPubsub(cfg.ProjectID, pokeSubID, Sub)
+
+		logger.Info("Creating ephemeral poke subscription", "sub", pokeSubName)
+
+		// 2. Create the subscription on Pub/Sub
+		_, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+			Name:  pokeSubName,
+			Topic: cfg.PushNotificationsTopicID,
+			// Expiration Policy: Never expire while active.
+			ExpirationPolicy: &pubsubpb.ExpirationPolicy{Ttl: nil},
+		})
+		if err != nil {
+			logger.Error("Failed to create poke subscription", "err", err)
+			os.Exit(1)
+		}
+
+		// 3. Ensure cleanup on shutdown
+		defer func() {
+			logger.Info("Deleting ephemeral poke subscription", "sub", pokeSubName)
+			if err := psClient.SubscriptionAdminClient.DeleteSubscription(context.Background(), &pubsubpb.DeleteSubscriptionRequest{Subscription: pokeSubName}); err != nil {
+				logger.Warn("Failed to delete poke subscription", "err", err)
+			}
+		}()
+
+		// 4. Create the Consumer attached to this ephemeral subscription
+		pokeConsumer, err := messagepipeline.NewGooglePubsubConsumer(
+			messagepipeline.NewGooglePubsubConsumerDefaults(pokeSubName),
+			psClient,
+			logger,
+		)
+		if err != nil {
+			logger.Error("Poke Consumer init failed", "err", err)
+			os.Exit(1)
+		}
+
 		connManager, err = realtime.NewConnectionManager(
-			":"+cfg.WebSocketPort, // Prepend ':' for listener
-			wsAuthMiddleware,
+			":"+cfg.WebSocketPort,
+			wsAuth,
 			deps.PresenceCache,
 			deps.MessageQueue,
+			pokeConsumer, // Injected here
 			logger.With("component", "ConnManager"),
 		)
 		if err != nil {
-			logger.Error("Failed to create Connection Manager", "err", err)
+			logger.Error("Connection Manager init failed", "err", err)
 			os.Exit(1)
 		}
 	}
 
-	// --- 9. Run the application ---
-	// app.Run handles nil pointers safely thanks to the refactor
 	app.Run(ctx, logger, apiService, connManager)
 }
 
 // newDependencies builds the service dependency container.
-func newDependencies(ctx context.Context, cfg *config.AppConfig, logger *slog.Logger) (*routing.ServiceDependencies, error) {
-	// Always builds production dependencies.
-	// Emulators are handled via environment variables, not a config flag.
-	return newProdDependencies(ctx, cfg, logger)
-}
-
-// newProdDependencies creates real, production-ready dependencies.
-func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger *slog.Logger) (*routing.ServiceDependencies, error) {
-	// Connect to GCP
+func newDependencies(ctx context.Context, cfg *config.AppConfig, logger *slog.Logger) (*routing.ServiceDependencies, *pubsub.Client, error) {
 	logger.Debug("Connecting to Firestore", "project_id", cfg.ProjectID)
 	fsClient, err := firestore.NewClient(ctx, cfg.ProjectID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to firestore: %w", err)
+		return nil, nil, fmt.Errorf("failed to connect to firestore: %w", err)
 	}
+
 	logger.Debug("Connecting to PubSub", "project_id", cfg.ProjectID)
 	psClient, err := pubsub.NewClient(ctx, cfg.ProjectID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to pubsub: %w", err)
+		return nil, nil, fmt.Errorf("failed to connect to pubsub: %w", err)
 	}
 
-	err = ensureTopics(ctx, cfg, psClient, logger)
-	if err != nil {
-		return nil, err
+	if err := ensureTopics(ctx, cfg, psClient, logger); err != nil {
+		return nil, nil, err
 	}
 
-	// --- Create new Queue components ---
 	coldQueue, err := fsqueue.NewFirestoreColdQueue(fsClient, cfg.ColdQueueCollection, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create cold queue: %w", err)
+		return nil, nil, fmt.Errorf("failed to create cold queue: %w", err)
 	}
 
 	hotQueue, err := newHotQueue(ctx, cfg, fsClient, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create hot queue: %w", err)
+		return nil, nil, fmt.Errorf("failed to create hot queue: %w", err)
 	}
 
 	messageQueue, err := queue.NewCompositeMessageQueue(hotQueue, coldQueue, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create composite queue: %w", err)
+		return nil, nil, fmt.Errorf("failed to create composite queue: %w", err)
 	}
-	// --- End Queue components ---
 
-	// Create other concrete dependencies
-	logger.Debug("Creating ingestion producer", "topic", cfg.IngressTopicID)
 	ingestProducer := psub.NewProducer(psClient.Publisher(cfg.IngressTopicID))
 
 	presenceCache, err := newPresenceCache(ctx, cfg, fsClient, logger)
 	if err != nil {
-		return nil, err
-	}
-	ingestConsumer, err := newIngestionConsumer(ctx, cfg, psClient, logger)
-	if err != nil {
-		return nil, err
-	}
-	pushNotifier, err := newPushNotifier(cfg, psClient, logger)
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	logger.Debug("All production dependencies initialized")
+	ingestConsumer, err := newIngestionConsumer(ctx, cfg, psClient, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pushNotifier, err := newPushNotifier(cfg, psClient, logger)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return &routing.ServiceDependencies{
 		IngestionProducer: ingestProducer,
@@ -273,176 +255,88 @@ func newProdDependencies(ctx context.Context, cfg *config.AppConfig, logger *slo
 		MessageQueue:      messageQueue,
 		PresenceCache:     presenceCache,
 		PushNotifier:      pushNotifier,
-	}, nil
+	}, psClient, nil
 }
 
-// newHotQueue creates the pluggable HotQueue based on config.
+// ... Helpers ...
+
 func newHotQueue(ctx context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger *slog.Logger) (queue.HotQueue, error) {
 	cacheType := cfg.HotQueue.Type
-	logger.Info("Initializing hot queue...", "type", cacheType)
-
 	switch cacheType {
 	case "firestore":
-		// Use the prototype Firestore-backed hot queue
-		mainCol := cfg.HotQueue.Firestore.MainCollectionName
-		pendingCol := cfg.HotQueue.Firestore.PendingCollectionName
-		if mainCol == "" || pendingCol == "" {
-			logger.Error("hot_queue type is firestore but collection names are not configured")
-			return nil, fmt.Errorf("hot_queue type is firestore but collection names are not configured")
-		}
-		logger.Debug("Using Firestore hot queue", "main_collection", mainCol, "pending_collection", pendingCol)
 		return fsqueue.NewFirestoreHotQueue(
 			fsClient,
-			mainCol,
-			pendingCol,
+			cfg.HotQueue.Firestore.MainCollectionName,
+			cfg.HotQueue.Firestore.PendingCollectionName,
 			logger,
 		)
-
 	case "redis":
-		// Use the production Redis-backed hot queue
-		redisAddr := cfg.HotQueue.Redis.Addr
-		if redisAddr == "" {
-			logger.Error("hot_queue type is redis but no address is configured (check REDIS_ADDR env var)")
-			return nil, fmt.Errorf("hot_queue type is redis but no address is configured (check REDIS_ADDR env var)")
-		}
-		logger.Debug("Connecting to Redis hot queue", "addr", redisAddr)
-		rdb := redis.NewClient(&redis.Options{
-			Addr: redisAddr,
-		})
-		// Test the connection
+		rdb := redis.NewClient(&redis.Options{Addr: cfg.HotQueue.Redis.Addr})
 		if err := rdb.Ping(ctx).Err(); err != nil {
-			logger.Error("Failed to connect to redis hot queue", "addr", redisAddr, "err", err)
-			return nil, fmt.Errorf("failed to connect to redis hot queue at %s: %w", redisAddr, err)
+			return nil, err
 		}
-		logger.Info("Connected to Redis hot queue", "addr", redisAddr)
 		return fsqueue.NewRedisHotQueue(rdb, logger)
-
 	default:
-		return nil, fmt.Errorf("invalid hot_queue type: %s (must be 'firestore' or 'redis')", cacheType)
+		return nil, fmt.Errorf("invalid hot_queue type")
 	}
 }
 
-// ensureTopics creates Pub/Sub topics if they don't already exist.
-func ensureTopics(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger *slog.Logger) error {
-	ingressTopic := &pubsubpb.Topic{
-		Name: cfg.IngressTopicID,
-	}
-	logger.Debug("Ensuring topic exists", "topic", cfg.IngressTopicID)
-	_, err := psClient.TopicAdminClient.CreateTopic(ctx, ingressTopic)
-	if err != nil {
-		if status.Code(err) == codes.AlreadyExists {
-			logger.Debug("Topic already exists, skipping creation", "topic", cfg.IngressTopicID)
-		} else {
-			logger.Error("Failed to create topic", "topic", cfg.IngressTopicID, "err", err)
-			return fmt.Errorf("could not create topic: %s", cfg.IngressTopicID)
-		}
-	}
-
-	ingressTopicDLQ := &pubsubpb.Topic{
-		Name: cfg.IngressTopicDLQID,
-	}
-	logger.Debug("Ensuring topic exists", "topic", cfg.IngressTopicDLQID)
-	_, err = psClient.TopicAdminClient.CreateTopic(ctx, ingressTopicDLQ)
-	if err != nil {
-		if status.Code(err) == codes.AlreadyExists {
-			logger.Debug("Topic already exists, skipping creation", "topic", cfg.IngressTopicDLQID)
-		} else {
-			logger.Error("Failed to create topic", "topic", cfg.IngressTopicDLQID, "err", err)
-			return fmt.Errorf("could not create topic: %s", cfg.IngressTopicDLQID)
+func ensureTopics(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, _ *slog.Logger) error {
+	topics := []string{cfg.IngressTopicID, cfg.IngressTopicDLQID, cfg.PushNotificationsTopicID}
+	for _, t := range topics {
+		_, err := psClient.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{Name: t})
+		if err != nil && status.Code(err) != codes.AlreadyExists {
+			return fmt.Errorf("failed to create topic %s: %w", t, err)
 		}
 	}
 	return nil
 }
 
-// newIngestionConsumer creates the Pub/Sub subscription and consumer.
 func newIngestionConsumer(ctx context.Context, cfg *config.AppConfig, psClient *pubsub.Client, logger *slog.Logger) (messagepipeline.MessageConsumer, error) {
-	subConfig := &pubsubpb.Subscription{
-		Name:               cfg.IngressSubscriptionID,
-		Topic:              cfg.IngressTopicID,
-		AckDeadlineSeconds: 10,
-		DeadLetterPolicy: &pubsubpb.DeadLetterPolicy{
-			DeadLetterTopic:     cfg.IngressTopicDLQID,
-			MaxDeliveryAttempts: 5,
-		},
-		EnableMessageOrdering: false,
+	subName := cfg.IngressSubscriptionID
+	_, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:  subName,
+		Topic: cfg.IngressTopicID,
+	})
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		return nil, err
 	}
-	logger.Debug("Ensuring subscription exists", "sub", subConfig.Name, "topic", subConfig.Topic)
-	_, err := psClient.SubscriptionAdminClient.CreateSubscription(ctx, subConfig)
-	if err != nil {
-		if status.Code(err) == codes.AlreadyExists {
-			logger.Debug("Subscription already exists, skipping creation", "sub", subConfig.Name)
-		} else {
-			logger.Error("Failed to create subscription", "sub", subConfig.Name, "err", err)
-			return nil, fmt.Errorf("could not create sub: %s", cfg.IngressSubscriptionID)
-		}
-	}
-
-	// This external library expects a zerolog.Logger. We pass zerolog.Nop()
-	// as our service-wide logger is slog.
 	return messagepipeline.NewGooglePubsubConsumer(
-		messagepipeline.NewGooglePubsubConsumerDefaults(subConfig.Name), psClient, logger,
+		messagepipeline.NewGooglePubsubConsumerDefaults(subName), psClient, logger,
 	)
 }
 
-// newPresenceCache creates the pluggable PresenceCache based on config.
-func newPresenceCache(_ context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger *slog.Logger) (cache.PresenceCache[urn.URN, routing.ConnectionInfo], error) {
-	cacheType := cfg.PresenceCache.Type
-	logger.Info("Initializing presence cache...", "type", cacheType)
-	switch cacheType {
-	case "firestore":
-		logger.Debug("Using Firestore presence cache", "collection", cfg.PresenceCache.Firestore.MainCollectionName)
+func newPresenceCache(_ context.Context, cfg *config.AppConfig, fsClient *firestore.Client, _ *slog.Logger) (cache.PresenceCache[urn.URN, routing.ConnectionInfo], error) {
+	if cfg.PresenceCache.Type == "firestore" {
 		return cache.NewFirestorePresenceCache[urn.URN, routing.ConnectionInfo](
 			fsClient,
 			cfg.PresenceCache.Firestore.MainCollectionName,
 		)
-	default:
-		return nil, fmt.Errorf("invalid presence_cache type: %s", cacheType)
 	}
+	// Add other cache types if needed
+	return nil, fmt.Errorf("invalid presence type")
 }
 
-// newFirestoreTokenFetcher creates the adapter for fetching device tokens from Firestore.
-func newFirestoreTokenFetcher(ctx context.Context, cfg *config.AppConfig, fsClient *firestore.Client, logger *slog.Logger) (cache.Fetcher[urn.URN, []routing.DeviceToken], error) {
-	logger.Debug("Initializing Firestore token fetcher", "collection", "device-tokens")
-
-	// This external library also expects a zerolog.Logger. We pass Nop.
-	stringDocFetcher, err := cache.NewFirestore[string, persistence.DeviceTokenDoc](
-		ctx,
-		&cache.FirestoreConfig{ProjectID: cfg.ProjectID, CollectionName: "device-tokens"},
-		fsClient,
-		logger,
-	)
-	if err != nil {
-		return nil, err
-	}
-	stringTokenFetcher := &persistence.FirestoreTokenAdapter{DocFetcher: stringDocFetcher}
-	return persistence.NewURNTokenFetcherAdapter(stringTokenFetcher), nil
-}
-
-// newPushNotifier creates the producer for sending push notifications.
 func newPushNotifier(cfg *config.AppConfig, psClient *pubsub.Client, logger *slog.Logger) (routing.PushNotifier, error) {
-	logger.Debug("Initializing push notifier producer", "topic", cfg.PushNotificationsTopicID)
-
-	// This external library also expects a zerolog.Logger. We pass Nop.
-	pushProducer, err := messagepipeline.NewGooglePubsubProducer(
+	prod, err := messagepipeline.NewGooglePubsubProducer(
 		messagepipeline.NewGooglePubsubProducerDefaults(cfg.PushNotificationsTopicID), psClient, logger,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return push.NewPubSubNotifier(pushProducer, logger)
+	return push.NewPubSubNotifier(prod, logger)
 }
 
-// PS is a type for Pub/Sub resource types (Topic or Subscription).
 type PS string
 
 const (
-	// Sub identifies a subscription resource.
 	Sub PS = "subscriptions"
-	// Pub identifies a topic resource.
 	Pub PS = "topics"
 )
 
-// convertPubsub formats a short ID into a full GCP resource name.
 func convertPubsub(project, id string, ps PS) string {
+	if strings.HasPrefix(id, "projects/") {
+		return id
+	}
 	return fmt.Sprintf("projects/%s/%s/%s", project, ps, id)
 }

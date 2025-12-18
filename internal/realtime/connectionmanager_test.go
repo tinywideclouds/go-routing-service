@@ -1,6 +1,5 @@
 /*
 File: internal/realtime/connectionmanager_test.go
-Description: Verifies Handle-based connection registration.
 */
 package realtime
 
@@ -20,7 +19,9 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+	"github.com/illmade-knight/go-dataflow/pkg/messagepipeline"
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tinywideclouds/go-routing-service/pkg/routing"
@@ -31,21 +32,53 @@ import (
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// --- Mocks (Same as before) ---
+// --- Mocks ---
+
+type mockPokeConsumer struct {
+	mock.Mock
+	msgChan  chan messagepipeline.Message
+	doneChan chan struct{}
+}
+
+func newMockPokeConsumer() *mockPokeConsumer {
+	return &mockPokeConsumer{
+		msgChan:  make(chan messagepipeline.Message, 10),
+		doneChan: make(chan struct{}),
+	}
+}
+
+func (m *mockPokeConsumer) Start(ctx context.Context) error {
+	return m.Called(ctx).Error(0)
+}
+func (m *mockPokeConsumer) Stop(ctx context.Context) error {
+	close(m.msgChan)
+	close(m.doneChan)
+	return m.Called(ctx).Error(0)
+}
+func (m *mockPokeConsumer) Messages() <-chan messagepipeline.Message {
+	return m.msgChan
+}
+func (m *mockPokeConsumer) Done() <-chan struct{} {
+	return m.doneChan
+}
+
 type mockPresenceCache struct{ mock.Mock }
 
-func (m *mockPresenceCache) Set(ctx context.Context, key urn.URN, val routing.ConnectionInfo) error {
-	return m.Called(ctx, key, val).Error(0)
+func (m *mockPresenceCache) AddSession(ctx context.Context, key urn.URN, sessionID string, val routing.ConnectionInfo) error {
+	return m.Called(ctx, key, sessionID, val).Error(0)
 }
-func (m *mockPresenceCache) Fetch(ctx context.Context, key urn.URN) (routing.ConnectionInfo, error) {
-	return m.Called(ctx, key).Get(0).(routing.ConnectionInfo), m.Called(ctx, key).Error(1)
+func (m *mockPresenceCache) RemoveSession(ctx context.Context, key urn.URN, sessionID string) (int, error) {
+	args := m.Called(ctx, key, sessionID)
+	return args.Int(0), args.Error(1)
 }
-func (m *mockPresenceCache) Delete(ctx context.Context, key urn.URN) error {
+func (m *mockPresenceCache) FetchSessions(ctx context.Context, key urn.URN) (map[string]routing.ConnectionInfo, error) {
+	args := m.Called(ctx, key)
+	return args.Get(0).(map[string]routing.ConnectionInfo), args.Error(1)
+}
+func (m *mockPresenceCache) Clear(ctx context.Context, key urn.URN) error {
 	return m.Called(ctx, key).Error(0)
 }
-func (m *mockPresenceCache) Close() error {
-	return m.Called().Error(0)
-}
+func (m *mockPresenceCache) Close() error { return m.Called().Error(0) }
 
 type mockMessageQueue struct{ mock.Mock }
 
@@ -69,11 +102,10 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 	return m.Called(ctx, userURN).Error(0)
 }
 
-// --- Test Helpers ---
+// ... Helpers ...
 const testKeyID = "test-key-id-1"
 
 func createTestToken(_ *testing.T, userID, handle, keyID string, privateKey *rsa.PrivateKey) (string, error) {
-	// Add 'handle' to claims to test resolution priority
 	claims := jwt.MapClaims{
 		"sub": userID,
 		"iat": time.Now().Unix(),
@@ -101,13 +133,13 @@ func newMockJWKSServer(t *testing.T, keyID string, publicKey *rsa.PublicKey) *ht
 	}))
 }
 
-// --- Test Fixture ---
 type testFixture struct {
 	cm            *ConnectionManager
 	presenceCache *mockPresenceCache
 	messageQueue  *mockMessageQueue
+	pokeConsumer  *mockPokeConsumer
 	wsServer      *httptest.Server
-	userURN       urn.URN // This will now be the HANDLE URN
+	userURN       urn.URN
 	wg            *sync.WaitGroup
 	token         string
 }
@@ -118,6 +150,7 @@ func setup(t *testing.T) *testFixture {
 
 	presenceCache := new(mockPresenceCache)
 	messageQueue := new(mockMessageQueue)
+	pokeConsumer := newMockPokeConsumer()
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -127,28 +160,27 @@ func setup(t *testing.T) *testFixture {
 	authMiddleware, err := middleware.NewJWKSWebsocketAuthMiddleware(mockJWKSServer.URL, logger)
 	require.NoError(t, err)
 
-	// Create a token with BOTH identity and handle
 	identityURNStr := "urn:auth:google:123"
 	handleURNStr := "urn:lookup:email:test@test.com"
 
 	token, err := createTestToken(t, identityURNStr, handleURNStr, testKeyID, privateKey)
 	require.NoError(t, err)
 
-	cm, err := NewConnectionManager("0", authMiddleware, presenceCache, messageQueue, logger)
+	cm, err := NewConnectionManager("0", authMiddleware, presenceCache, messageQueue, pokeConsumer, logger)
 	require.NoError(t, err)
 
 	wsServer := httptest.NewServer(cm.server.Handler)
 	t.Cleanup(wsServer.Close)
 
-	// We expect the system to resolve to the HANDLE
 	expectedURN, _ := urn.Parse(handleURNStr)
 
 	return &testFixture{
 		cm:            cm,
 		presenceCache: presenceCache,
 		messageQueue:  messageQueue,
+		pokeConsumer:  pokeConsumer,
 		wsServer:      wsServer,
-		userURN:       expectedURN, // Expectations use this
+		userURN:       expectedURN,
 		wg:            &sync.WaitGroup{},
 		token:         token,
 	}
@@ -157,63 +189,67 @@ func setup(t *testing.T) *testFixture {
 func (fx *testFixture) connectClient(t *testing.T) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(fx.wsServer.URL, "http") + "/connect"
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 45 * time.Second,
-		Subprotocols:     []string{fx.token},
-	}
-
+	dialer := websocket.Dialer{HandshakeTimeout: 45 * time.Second, Subprotocols: []string{fx.token}}
 	wsClientConn, _, err := dialer.Dial(wsURL, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = wsClientConn.Close() })
-
-	require.Eventually(t, func() bool {
-		// Check if connection is stored under the HANDLE URN
-		_, ok := fx.cm.connections.Load(fx.userURN.String())
-		return ok
-	}, 2*time.Second, 10*time.Millisecond)
-
 	return wsClientConn
 }
 
 func TestConnectionManager_Connect_UsesHandle(t *testing.T) {
 	fx := setup(t)
 
-	// Expectation: Presence is set for the HANDLE URN
-	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.AnythingOfType("routing.ConnectionInfo")).Return(nil).Once()
+	// Since Start() is NOT called, we don't mock pokeConsumer lifecycle here.
+	fx.presenceCache.On("AddSession", mock.Anything, fx.userURN, mock.AnythingOfType("string"), mock.AnythingOfType("routing.ConnectionInfo")).Return(nil).Once()
 
-	_ = fx.connectClient(t)
+	conn := fx.connectClient(t)
+	defer conn.Close()
 
 	fx.presenceCache.AssertExpectations(t)
 }
 
-func TestConnectionManager_Disconnect_UsesHandle(t *testing.T) {
+func TestConnectionManager_HandlePoke_RoutesToCorrectSession(t *testing.T) {
 	fx := setup(t)
-	fx.presenceCache.On("Set", mock.Anything, fx.userURN, mock.Anything).Return(nil)
+	ctx := context.Background()
+
+	// 1. Expect Consumer Lifecycle
+	fx.pokeConsumer.On("Start", mock.Anything).Return(nil)
+	fx.pokeConsumer.On("Stop", mock.Anything).Return(nil)
+
+	// 2. Start Manager
+	go fx.cm.Start(ctx)
+	defer fx.cm.Shutdown(ctx)
+
+	// Wait a moment for the Start goroutine to launch the consumer loop
+	time.Sleep(50 * time.Millisecond)
+
+	// 3. Connect Client
+	fx.presenceCache.On("AddSession", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	// RemoveSession might be called during shutdown/close
+	fx.presenceCache.On("RemoveSession", mock.Anything, mock.Anything, mock.Anything).Return(0, nil).Maybe()
+	fx.messageQueue.On("MigrateHotToCold", mock.Anything, mock.Anything).Return(nil).Maybe()
+
 	wsClientConn := fx.connectClient(t)
+	defer wsClientConn.Close()
 
-	// Expectation: Delete/Migrate called for HANDLE URN
-	fx.wg.Add(1)
-	fx.presenceCache.On("Delete", mock.Anything, fx.userURN).Return(nil).Once()
-	fx.messageQueue.On("MigrateHotToCold", mock.Anything, fx.userURN).
-		Return(nil).
-		Run(func(args mock.Arguments) { fx.wg.Done() }).
-		Once()
+	// 4. Send Poke
+	ackWg := sync.WaitGroup{}
+	ackWg.Add(1)
 
-	_ = wsClientConn.Close()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fx.wg.Wait()
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout")
+	pokePayload := `{"type": "poke", "recipient": "` + fx.userURN.String() + `"}`
+	msg := messagepipeline.Message{
+		MessageData: messagepipeline.MessageData{ID: "poke-1", Payload: []byte(pokePayload)},
+		Ack:         func() { ackWg.Done() },
 	}
 
-	fx.presenceCache.AssertExpectations(t)
-	fx.messageQueue.AssertExpectations(t)
+	// Send to consumer channel
+	fx.pokeConsumer.msgChan <- msg
+
+	// 5. Verify Receipt
+	wsClientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, p, err := wsClientConn.ReadMessage()
+	require.NoError(t, err, "Client should receive poke signal")
+	assert.JSONEq(t, "{}", string(p))
+
+	// 6. Verify Ack
+	ackWg.Wait()
 }

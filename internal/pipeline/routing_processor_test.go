@@ -22,34 +22,38 @@ import (
 )
 
 // --- Mocks ---
-// (mockFetcher is DELETED as it is no longer used)
 
 type mockPresenceCache[K comparable, V any] struct {
 	mock.Mock
 }
 
-// ... (Presence Cache methods unchanged) ...
-func (m *mockPresenceCache[K, V]) Set(ctx context.Context, key K, val V) error { return nil }
-func (m *mockPresenceCache[K, V]) Fetch(ctx context.Context, key K) (V, error) {
-	args := m.Called(ctx, key)
-	return args.Get(0).(V), args.Error(1)
+func (m *mockPresenceCache[K, V]) AddSession(ctx context.Context, key K, sessionID string, val V) error {
+	return m.Called(ctx, key, sessionID, val).Error(0)
 }
-func (m *mockPresenceCache[K, V]) Delete(ctx context.Context, key K) error { return nil }
-func (m *mockPresenceCache[K, V]) Close() error                            { return nil }
+func (m *mockPresenceCache[K, V]) RemoveSession(ctx context.Context, key K, sessionID string) (int, error) {
+	args := m.Called(ctx, key, sessionID)
+	return args.Int(0), args.Error(1)
+}
+func (m *mockPresenceCache[K, V]) FetchSessions(ctx context.Context, key K) (map[string]V, error) {
+	args := m.Called(ctx, key)
+	if val, ok := args.Get(0).(map[string]V); ok {
+		return val, args.Error(1)
+	}
+	return nil, args.Error(1)
+}
+func (m *mockPresenceCache[K, V]) Clear(ctx context.Context, key K) error { return nil }
+func (m *mockPresenceCache[K, V]) Close() error                           { return nil }
 
 type mockMessageQueue struct {
 	mock.Mock
 }
 
-// ... (Queue methods unchanged) ...
 func (m *mockMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
 	return m.Called(ctx, envelope).Error(0)
 }
 func (m *mockMessageQueue) EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error {
 	return m.Called(ctx, envelope).Error(0)
 }
-
-// ... (Retrieve/Ack/Migrate stubs unchanged) ...
 func (m *mockMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing_v1.QueuedMessage, error) {
 	return nil, nil
 }
@@ -62,7 +66,6 @@ type mockPushNotifier struct {
 	mock.Mock
 }
 
-// REFACTORED: Signature update
 func (m *mockPushNotifier) NotifyOffline(ctx context.Context, envelope *secure.SecureEnvelope) error {
 	return m.Called(ctx, envelope).Error(0)
 }
@@ -96,7 +99,10 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 		PushNotifier:  pushNotifier,
 	}
 
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, nil)
+	// Mock Online: FetchSessions returns a map with 1 entry
+	activeSessions := map[string]routing.ConnectionInfo{"s1": {}}
+	presenceCache.On("FetchSessions", mock.Anything, testURN).Return(activeSessions, nil)
+
 	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(nil)
 	pushNotifier.On("PokeOnline", mock.Anything, testURN).Return(nil)
 
@@ -107,17 +113,14 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 }
 
 func TestRoutingProcessor_ExpressLane_Offline_Ephemeral(t *testing.T) {
-	// Arrange
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	messageQueue := new(mockMessageQueue)
 	pushNotifier := new(mockPushNotifier)
-	// REMOVED: deviceTokenFetcher mock
 
 	deps := &routing.ServiceDependencies{
 		PresenceCache: presenceCache,
 		MessageQueue:  messageQueue,
 		PushNotifier:  pushNotifier,
-		// REMOVED: DeviceTokenFetcher
 	}
 
 	syncEnvelope := &secure.SecureEnvelope{
@@ -127,28 +130,22 @@ func TestRoutingProcessor_ExpressLane_Offline_Ephemeral(t *testing.T) {
 		Priority:      5,
 	}
 
-	// 1. User is Offline
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, errTest)
+	// 1. User is Offline (Empty map or error)
+	presenceCache.On("FetchSessions", mock.Anything, testURN).Return(map[string]routing.ConnectionInfo{}, errTest)
 
-	// 2. Expect EnqueueHot
 	messageQueue.On("EnqueueHot", mock.Anything, syncEnvelope).Return(nil)
-
-	// 3. Expect Push Notification (New Signature: No Tokens)
 	pushNotifier.On("NotifyOffline", mock.Anything, syncEnvelope).Return(nil)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 
-	// Act
 	err := processor(context.Background(), testMessage, syncEnvelope)
 
-	// Assert
 	require.NoError(t, err)
 	messageQueue.AssertCalled(t, "EnqueueHot", mock.Anything, syncEnvelope)
 	pushNotifier.AssertCalled(t, "NotifyOffline", mock.Anything, syncEnvelope)
 }
 
 func TestRoutingProcessor_StandardLane_Offline_Ephemeral_Drop(t *testing.T) {
-	// (Unchanged logic)
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	messageQueue := new(mockMessageQueue)
 	deps := &routing.ServiceDependencies{
@@ -163,7 +160,7 @@ func TestRoutingProcessor_StandardLane_Offline_Ephemeral_Drop(t *testing.T) {
 		Priority:      1,
 	}
 
-	presenceCache.On("Fetch", mock.Anything, testURN).Return(routing.ConnectionInfo{}, errTest)
+	presenceCache.On("FetchSessions", mock.Anything, testURN).Return(map[string]routing.ConnectionInfo{}, errTest)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
 	err := processor(context.Background(), testMessage, typingEnvelope)
