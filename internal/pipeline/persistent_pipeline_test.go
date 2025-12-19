@@ -34,16 +34,13 @@ import (
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// --- Mocks ---
-// (mockTokenFetcher DELETED)
-
 type mockHotQueue struct {
 	mock.Mock
 }
 
-// ... (HotQueue mock methods unchanged) ...
-func (m *mockHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	return m.Called(ctx, envelope).Error(0)
+// REFACTORED: Accept messageID
+func (m *mockHotQueue) Enqueue(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	return m.Called(ctx, messageID, envelope).Error(0)
 }
 func (m *mockHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routingv1.QueuedMessage, error) {
 	return nil, nil
@@ -59,7 +56,6 @@ type mockPPushNotifier struct {
 	mock.Mock
 }
 
-// REFACTORED: Signature
 func (m *mockPPushNotifier) NotifyOffline(ctx context.Context, envelope *secure.SecureEnvelope) error {
 	args := m.Called(ctx, envelope)
 	return args.Error(0)
@@ -69,10 +65,10 @@ func (m *mockPPushNotifier) PokeOnline(ctx context.Context, urn urn.URN) error {
 	return m.Called(ctx, urn).Error(0)
 }
 
-// storedMessageForTest unchanged...
+// FIX: Match the storage format used by FirestoreColdQueue (Protobuf)
 type storedMessageForTest struct {
-	QueuedAt time.Time              `firestore:"queued_at"`
-	Envelope *secure.SecureEnvelope `firestore:"envelope"`
+	QueuedAt time.Time                `firestore:"queued_at"`
+	Envelope *secure.SecureEnvelopePb `firestore:"envelope"`
 }
 
 func TestPersistentPipeline_Integration(t *testing.T) {
@@ -99,24 +95,22 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	mockHot := new(mockHotQueue)
-	mockHot.On("Enqueue", mock.Anything, mock.Anything).Return(fmt.Errorf("hot queue offline"))
+	// REFACTORED: Mock expectations to accept ID (mock.Anything)
+	mockHot.On("Enqueue", mock.Anything, mock.Anything, mock.Anything).Return(fmt.Errorf("hot queue offline"))
 
 	messageQueue, err := queue.NewCompositeMessageQueue(mockHot, store, logger)
 	require.NoError(t, err)
 
-	// mockTokenFetcher removed.
 	pushNotifier := new(mockPPushNotifier)
-	// We expect NotifyOffline to be called (since user is offline), but we don't care if it fails for this test
 	pushNotifier.On("NotifyOffline", mock.Anything, mock.Anything).Return(nil)
 
 	deps := &routing.ServiceDependencies{
 		PresenceCache: presenceCache,
 		MessageQueue:  messageQueue,
-		// REMOVED: DeviceTokenFetcher
-		PushNotifier: pushNotifier,
+		PushNotifier:  pushNotifier,
 	}
 
-	// 4. Arrange: Create Pipeline (Unchanged logic)
+	// 4. Arrange: Create Pipeline
 	ingressTopicID := "ingress-topic-" + runID
 	ingestSubID := "ingress-sub-" + runID
 	createPubsubResources(t, ctx, psClient, projectID, ingressTopicID, ingestSubID)
@@ -148,7 +142,6 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 
 	ingestPublisher := psClient.Publisher(ingressTopicID)
 
-	// 6. Cleanup (Unchanged)
 	t.Cleanup(func() { ingestPublisher.Stop() })
 	t.Cleanup(func() { _ = fsClient.Close() })
 	t.Cleanup(func() { _ = psClient.Close() })
@@ -173,12 +166,16 @@ func TestPersistentPipeline_Integration(t *testing.T) {
 
 	docs, _ := fsClient.Collection(coldCollection).Doc(recipientURN.String()).Collection("messages").Documents(ctx).GetAll()
 	var storedData storedMessageForTest
-	_ = docs[0].DataTo(&storedData)
+	err = docs[0].DataTo(&storedData)
+	require.NoError(t, err)
 
-	assert.Equal(t, originalEnvelope.EncryptedData, storedData.Envelope.EncryptedData)
+	// FIX: Convert the retrieved Proto back to Native for comparison
+	retrievedEnvelope, err := secure.FromProto(storedData.Envelope)
+	require.NoError(t, err)
+
+	assert.Equal(t, originalEnvelope.EncryptedData, retrievedEnvelope.EncryptedData)
 }
 
-// createPubsubResources helper unchanged...
 func createPubsubResources(t *testing.T, ctx context.Context, client *pubsub.Client, projectID, topicID, subID string) {
 	t.Helper()
 	topicName := fmt.Sprintf("projects/%s/topics/%s", projectID, topicID)

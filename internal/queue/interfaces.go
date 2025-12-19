@@ -13,7 +13,7 @@ import (
 // Queue is the base interface for a user-specific message queue.
 type Queue interface {
 	// Enqueue adds a message to the queue for a specific recipient.
-	Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error
+	Enqueue(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error
 
 	// RetrieveBatch fetches the next available batch of queued messages
 	// for a user, ordered by when they were queued (oldest first).
@@ -46,10 +46,10 @@ type HotQueue interface {
 type MessageQueue interface {
 	// EnqueueHot attempts to enqueue a message to the fast, transient "hot" queue.
 	// If the hot queue fails, it MUST fall back to the cold queue.
-	EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error
+	EnqueueHot(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error
 
 	// EnqueueCold enqueues a message directly to the durable "cold" queue.
-	EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error
+	EnqueueCold(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error
 
 	// RetrieveBatch fetches the next batch of messages, checking the hot
 	// queue first, then falling back to the cold queue if hot is empty.

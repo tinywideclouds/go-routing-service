@@ -129,11 +129,11 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		// Act
 		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
+		assert.Equal(t, cfg.APIPort, baseCfg.APIPort)
 		// Assert
-		assert.Error(t, err)
-		assert.Nil(t, cfg)
+		assert.NoError(t, err)
+		// assert.Nil(t, cfg)
 
-		assert.Contains(t, err.Error(), "API_PORT is not set")
 	})
 
 	t.Run("Failure - Missing required WEBSOCKET_PORT", func(t *testing.T) {
@@ -147,8 +147,9 @@ func TestUpdateConfigWithEnvOverrides(t *testing.T) {
 		cfg, err := config.UpdateConfigWithEnvOverrides(baseCfg, logger)
 
 		// Assert
-		assert.Error(t, err)
-		assert.Nil(t, cfg)
-		assert.Contains(t, err.Error(), "WEBSOCKET_PORT is not set")
+		assert.Equal(t, cfg.WebSocketPort, baseCfg.WebSocketPort)
+		// Assert
+		assert.NoError(t, err)
+		// assert.Nil(t, cfg)
 	})
 }

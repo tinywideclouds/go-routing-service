@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/tinywideclouds/go-routing-service/internal/queue"
 
@@ -55,12 +54,16 @@ func NewRedisHotQueue(client redisClient, logger *slog.Logger) (queue.HotQueue, 
 	}, nil
 }
 
-// Enqueue adds a message to the appropriate priority band.
-func (s *RedisHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	log := s.logger.With("user", envelope.RecipientID.String(), "priority", envelope.Priority)
+// Enqueue adds a message to the appropriate priority band using the provided messageID.
+func (s *RedisHotQueue) Enqueue(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	log := s.logger.With("user", envelope.RecipientID.String(), "priority", envelope.Priority, "msg_id", messageID)
+
+	if messageID == "" {
+		return fmt.Errorf("messageID cannot be empty")
+	}
 
 	msg := queuedRedisMessage{
-		ID:       uuid.NewString(),
+		ID:       messageID, // Use ID provided by router
 		Envelope: envelope,
 		QueuedAt: time.Now().UTC(),
 	}
@@ -180,6 +183,7 @@ func (s *RedisHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, messag
 }
 
 // MigrateToCold moves all messages from High, Standard, and Pending queues to ColdQueue.
+// Crucially, it reuses the MessageID found in the JSON payload when enqueuing to ColdQueue.
 func (s *RedisHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, destination queue.ColdQueue) error {
 	log := s.logger.With("user", userURN.String())
 	log.Info("Starting hot-to-cold migration")
@@ -191,9 +195,9 @@ func (s *RedisHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, dest
 		userQueueKey(userURN),     // 3. Standard (Unsent)
 	}
 
-	var messagesToPersist []*secure.SecureEnvelope
 	var payloadsToDelete []string
 	var keysToDelete []string
+	var count int
 
 	for _, key := range keysToMigrate {
 		payloads, err := s.client.LRange(ctx, key, 0, -1).Result()
@@ -213,16 +217,11 @@ func (s *RedisHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, dest
 
 			// Migration Logic: Persist if NOT ephemeral
 			if !msg.Envelope.IsEphemeral {
-				messagesToPersist = append(messagesToPersist, msg.Envelope)
-			}
-		}
-	}
-
-	// 1. Write persistent messages to Cold Queue
-	if len(messagesToPersist) > 0 {
-		for _, env := range messagesToPersist {
-			if err := destination.Enqueue(ctx, env); err != nil {
-				return fmt.Errorf("failed to write to cold queue: %w", err)
+				// Use the ID from the Hot Queue record
+				if err := destination.Enqueue(ctx, msg.ID, msg.Envelope); err != nil {
+					return fmt.Errorf("failed to write to cold queue: %w", err)
+				}
+				count++
 			}
 		}
 	}
@@ -232,7 +231,7 @@ func (s *RedisHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, dest
 		_ = s.client.LRem(ctx, keysToDelete[i], 1, payload).Err()
 	}
 
-	log.Info("Migration complete", "persisted", len(messagesToPersist), "cleaned", len(payloadsToDelete))
+	log.Info("Migration complete", "migrated_count", count, "cleaned_count", len(payloadsToDelete))
 	return nil
 }
 

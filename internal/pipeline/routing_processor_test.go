@@ -21,8 +21,6 @@ import (
 	"github.com/tinywideclouds/go-platform/pkg/secure/v1"
 )
 
-// --- Mocks ---
-
 type mockPresenceCache[K comparable, V any] struct {
 	mock.Mock
 }
@@ -48,11 +46,12 @@ type mockMessageQueue struct {
 	mock.Mock
 }
 
-func (m *mockMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	return m.Called(ctx, envelope).Error(0)
+// REFACTORED: Accept messageID
+func (m *mockMessageQueue) EnqueueHot(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	return m.Called(ctx, messageID, envelope).Error(0)
 }
-func (m *mockMessageQueue) EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	return m.Called(ctx, envelope).Error(0)
+func (m *mockMessageQueue) EnqueueCold(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	return m.Called(ctx, messageID, envelope).Error(0)
 }
 func (m *mockMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing_v1.QueuedMessage, error) {
 	return nil, nil
@@ -73,7 +72,6 @@ func (m *mockPushNotifier) PokeOnline(ctx context.Context, recipient urn.URN) er
 	return m.Called(ctx, recipient).Error(0)
 }
 
-// --- Test Setup ---
 var (
 	nopLogger    = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	testConfig   = &config.AppConfig{}
@@ -87,8 +85,6 @@ var (
 	errTest     = errors.New("something went wrong")
 )
 
-// --- Test Cases ---
-
 func TestRoutingProcessor_OnlineUser(t *testing.T) {
 	presenceCache := new(mockPresenceCache[urn.URN, routing.ConnectionInfo])
 	messageQueue := new(mockMessageQueue)
@@ -99,11 +95,11 @@ func TestRoutingProcessor_OnlineUser(t *testing.T) {
 		PushNotifier:  pushNotifier,
 	}
 
-	// Mock Online: FetchSessions returns a map with 1 entry
 	activeSessions := map[string]routing.ConnectionInfo{"s1": {}}
 	presenceCache.On("FetchSessions", mock.Anything, testURN).Return(activeSessions, nil)
 
-	messageQueue.On("EnqueueHot", mock.Anything, testEnvelope).Return(nil)
+	// REFACTORED: Expect ID
+	messageQueue.On("EnqueueHot", mock.Anything, mock.Anything, testEnvelope).Return(nil)
 	pushNotifier.On("PokeOnline", mock.Anything, testURN).Return(nil)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
@@ -130,10 +126,10 @@ func TestRoutingProcessor_ExpressLane_Offline_Ephemeral(t *testing.T) {
 		Priority:      5,
 	}
 
-	// 1. User is Offline (Empty map or error)
 	presenceCache.On("FetchSessions", mock.Anything, testURN).Return(map[string]routing.ConnectionInfo{}, errTest)
 
-	messageQueue.On("EnqueueHot", mock.Anything, syncEnvelope).Return(nil)
+	// REFACTORED: Expect ID
+	messageQueue.On("EnqueueHot", mock.Anything, mock.Anything, syncEnvelope).Return(nil)
 	pushNotifier.On("NotifyOffline", mock.Anything, syncEnvelope).Return(nil)
 
 	processor := pipeline.NewRoutingProcessor(deps, testConfig, nopLogger)
@@ -141,7 +137,8 @@ func TestRoutingProcessor_ExpressLane_Offline_Ephemeral(t *testing.T) {
 	err := processor(context.Background(), testMessage, syncEnvelope)
 
 	require.NoError(t, err)
-	messageQueue.AssertCalled(t, "EnqueueHot", mock.Anything, syncEnvelope)
+	// Verify it was called with some string ID
+	messageQueue.AssertCalled(t, "EnqueueHot", mock.Anything, mock.AnythingOfType("string"), syncEnvelope)
 	pushNotifier.AssertCalled(t, "NotifyOffline", mock.Anything, syncEnvelope)
 }
 
@@ -166,5 +163,5 @@ func TestRoutingProcessor_StandardLane_Offline_Ephemeral_Drop(t *testing.T) {
 	err := processor(context.Background(), testMessage, typingEnvelope)
 
 	require.NoError(t, err)
-	messageQueue.AssertNotCalled(t, "EnqueueHot", mock.Anything, mock.Anything)
+	messageQueue.AssertNotCalled(t, "EnqueueHot", mock.Anything, mock.Anything, mock.Anything)
 }

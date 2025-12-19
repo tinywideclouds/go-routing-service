@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/google/uuid"
 	"github.com/tinywideclouds/go-routing-service/internal/queue"
 
 	// Platform packages
@@ -44,9 +43,14 @@ func NewFirestoreHotQueue(client *firestore.Client, mainCollection, pendingColle
 }
 
 // Enqueue saves to either the High or Standard collection based on Priority.
-func (s *FirestoreHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
+// It uses the provided messageID as the Document ID.
+func (s *FirestoreHotQueue) Enqueue(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
 	var collectionRef *firestore.CollectionRef
-	log := s.logger.With("user", envelope.RecipientID.String())
+	log := s.logger.With("user", envelope.RecipientID.String(), "msg_id", messageID)
+
+	if messageID == "" {
+		return fmt.Errorf("messageID cannot be empty")
+	}
 
 	// 1. Determine Target Band
 	if envelope.Priority >= 5 {
@@ -67,8 +71,9 @@ func (s *FirestoreHotQueue) Enqueue(ctx context.Context, envelope *secure.Secure
 		Envelope: pb,
 	}
 
-	docRef := collectionRef.Doc(uuid.NewString())
-	_, err := docRef.Create(ctx, storedMsg)
+	// Use the deterministic messageID as the Document ID
+	docRef := collectionRef.Doc(messageID)
+	_, err := docRef.Set(ctx, storedMsg)
 	if err != nil {
 		log.Error("Failed to enqueue message", "err", err)
 		return err
@@ -124,7 +129,7 @@ func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, 
 			}
 
 			queuedMessages = append(queuedMessages, &routing.QueuedMessage{
-				ID:       doc.Ref.ID,
+				ID:       doc.Ref.ID, // This ID is preserved from Enqueue
 				Envelope: nativeEnv,
 			})
 
@@ -148,12 +153,12 @@ func (s *FirestoreHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, 
 	return queuedMessages, nil
 }
 
-// Acknowledge deletes from Pending collection (Unchanged logic, just cleanup).
+// Acknowledge deletes from Pending collection.
 func (s *FirestoreHotQueue) Acknowledge(ctx context.Context, userURN urn.URN, messageIDs []string) error {
 	return s.deleteDocsFromCollection(ctx, s.pendingCollection(userURN), messageIDs, s.logger)
 }
 
-// MigrateToCold moves High, Standard, and Pending to ColdQueue.
+// MigrateToCold moves High, Standard, and Pending to ColdQueue, preserving IDs.
 func (s *FirestoreHotQueue) MigrateToCold(ctx context.Context, userURN urn.URN, destination queue.ColdQueue) error {
 	log := s.logger.With("user", userURN.String())
 	log.Info("Starting hot-to-cold migration")
@@ -191,9 +196,7 @@ func (s *FirestoreHotQueue) pendingCollection(urn urn.URN) *firestore.Collection
 	return s.client.Collection(s.pendingCollectionName).Doc(urn.String()).Collection("messages")
 }
 
-// (deleteDocsFromCollection and migrateCollection helpers are unchanged from previous upload)
-func (s *FirestoreHotQueue) deleteDocsFromCollection(ctx context.Context, collectionRef *firestore.CollectionRef, docIDs []string, log *slog.Logger) error {
-	// ... (Same implementation as before) ...
+func (s *FirestoreHotQueue) deleteDocsFromCollection(ctx context.Context, collectionRef *firestore.CollectionRef, docIDs []string, _ *slog.Logger) error {
 	if len(docIDs) == 0 {
 		return nil
 	}
@@ -210,8 +213,8 @@ func (s *FirestoreHotQueue) deleteDocsFromCollection(ctx context.Context, collec
 	return firstErr
 }
 
+// migrateCollection reads docs, enqueues them to cold storage using the EXISTING ID, and deletes them from hot.
 func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef *firestore.CollectionRef, destination queue.ColdQueue, log *slog.Logger) (int, error) {
-	// ... (Same implementation as before: Read, Filter Ephemeral, Enqueue Cold, Delete) ...
 	query := collectionRef.OrderBy("queued_at", firestore.Asc)
 	docSnaps, err := query.Documents(ctx).GetAll()
 	if err != nil || len(docSnaps) == 0 {
@@ -219,7 +222,7 @@ func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef
 	}
 
 	var docIDsToDelete []string
-	var messagesToPersist []*secure.SecureEnvelope
+	var count int
 
 	for _, doc := range docSnaps {
 		var storedMsg storedHotMessage
@@ -228,16 +231,17 @@ func (s *FirestoreHotQueue) migrateCollection(ctx context.Context, collectionRef
 
 		docIDsToDelete = append(docIDsToDelete, doc.Ref.ID)
 		if !nativeEnv.IsEphemeral {
-			messagesToPersist = append(messagesToPersist, nativeEnv)
+			// Enqueue to Cold Queue using the EXISTING Doc ID.
+			if err := destination.Enqueue(ctx, doc.Ref.ID, nativeEnv); err != nil {
+				log.Error("Failed to migrate message to cold queue", "msg_id", doc.Ref.ID, "err", err)
+				return count, err
+			}
+			count++
 		}
 	}
 
-	for _, env := range messagesToPersist {
-		if err := destination.Enqueue(ctx, env); err != nil {
-			return 0, err
-		}
+	if len(docIDsToDelete) > 0 {
+		s.deleteDocsFromCollection(ctx, collectionRef, docIDsToDelete, log)
 	}
-
-	s.deleteDocsFromCollection(ctx, collectionRef, docIDsToDelete, log)
-	return len(messagesToPersist), nil
+	return count, nil
 }

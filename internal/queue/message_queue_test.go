@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -25,8 +24,9 @@ type mockHotQueue struct {
 	mock.Mock
 }
 
-func (m *mockHotQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	args := m.Called(ctx, envelope)
+// REFACTORED: Accept messageID
+func (m *mockHotQueue) Enqueue(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, messageID, envelope)
 	return args.Error(0)
 }
 func (m *mockHotQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
@@ -49,8 +49,9 @@ type mockColdQueue struct {
 	mock.Mock
 }
 
-func (m *mockColdQueue) Enqueue(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	args := m.Called(ctx, envelope)
+// REFACTORED: Accept messageID
+func (m *mockColdQueue) Enqueue(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	args := m.Called(ctx, messageID, envelope)
 	return args.Error(0)
 }
 func (m *mockColdQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
@@ -71,7 +72,8 @@ var (
 	testURN, _ = urn.Parse("urn:contacts:user:test")
 	testEnv    = &secure.SecureEnvelope{RecipientID: testURN}
 	testMsg    = &routing.QueuedMessage{ID: "msg-1", Envelope: testEnv}
-	testErr    = errors.New("queue error")
+	errTest    = errors.New("queue error")
+	testID     = "msg-uuid-123" // Fixed ID for tests
 )
 
 type testFixture struct {
@@ -80,7 +82,6 @@ type testFixture struct {
 	comp MessageQueue
 }
 
-// newTestLogger creates a discard logger for tests.
 func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -88,7 +89,6 @@ func newTestLogger() *slog.Logger {
 func setup(t *testing.T) *testFixture {
 	hot := new(mockHotQueue)
 	cold := new(mockColdQueue)
-	// --- FIX: Use a local, discarded logger ---
 	comp, err := NewCompositeMessageQueue(hot, cold, newTestLogger())
 	require.NoError(t, err)
 
@@ -106,12 +106,12 @@ func TestEnqueueHot_Success(t *testing.T) {
 	ctx := context.Background()
 
 	// Hot queue succeeds
-	fx.hot.On("Enqueue", ctx, testEnv).Return(nil)
+	fx.hot.On("Enqueue", ctx, testID, testEnv).Return(nil)
 
-	err := fx.comp.EnqueueHot(ctx, testEnv)
+	err := fx.comp.EnqueueHot(ctx, testID, testEnv)
 	require.NoError(t, err)
 
-	fx.hot.AssertCalled(t, "Enqueue", ctx, testEnv)
+	fx.hot.AssertCalled(t, "Enqueue", ctx, testID, testEnv)
 	fx.cold.AssertNotCalled(t, "Enqueue")
 }
 
@@ -120,15 +120,15 @@ func TestEnqueueHot_Fallback(t *testing.T) {
 	ctx := context.Background()
 
 	// Hot queue fails
-	fx.hot.On("Enqueue", ctx, testEnv).Return(testErr)
-	// Cold queue succeeds
-	fx.cold.On("Enqueue", ctx, testEnv).Return(nil)
+	fx.hot.On("Enqueue", ctx, testID, testEnv).Return(errTest)
+	// Cold queue succeeds, MUST be called with same ID
+	fx.cold.On("Enqueue", ctx, testID, testEnv).Return(nil)
 
-	err := fx.comp.EnqueueHot(ctx, testEnv)
+	err := fx.comp.EnqueueHot(ctx, testID, testEnv)
 	require.NoError(t, err)
 
-	fx.hot.AssertCalled(t, "Enqueue", ctx, testEnv)
-	fx.cold.AssertCalled(t, "Enqueue", ctx, testEnv)
+	fx.hot.AssertCalled(t, "Enqueue", ctx, testID, testEnv)
+	fx.cold.AssertCalled(t, "Enqueue", ctx, testID, testEnv)
 }
 
 func TestEnqueueHot_Fatal(t *testing.T) {
@@ -136,27 +136,27 @@ func TestEnqueueHot_Fatal(t *testing.T) {
 	ctx := context.Background()
 
 	// Hot queue fails
-	fx.hot.On("Enqueue", ctx, testEnv).Return(testErr)
+	fx.hot.On("Enqueue", ctx, testID, testEnv).Return(errTest)
 	// Cold queue also fails
-	fx.cold.On("Enqueue", ctx, testEnv).Return(testErr)
+	fx.cold.On("Enqueue", ctx, testID, testEnv).Return(errTest)
 
-	err := fx.comp.EnqueueHot(ctx, testEnv)
+	err := fx.comp.EnqueueHot(ctx, testID, testEnv)
 	require.Error(t, err)
 
-	fx.hot.AssertCalled(t, "Enqueue", ctx, testEnv)
-	fx.cold.AssertCalled(t, "Enqueue", ctx, testEnv)
+	fx.hot.AssertCalled(t, "Enqueue", ctx, testID, testEnv)
+	fx.cold.AssertCalled(t, "Enqueue", ctx, testID, testEnv)
 }
 
 func TestEnqueueCold(t *testing.T) {
 	fx := setup(t)
 	ctx := context.Background()
 
-	fx.cold.On("Enqueue", ctx, testEnv).Return(nil)
+	fx.cold.On("Enqueue", ctx, testID, testEnv).Return(nil)
 
-	err := fx.comp.EnqueueCold(ctx, testEnv)
+	err := fx.comp.EnqueueCold(ctx, testID, testEnv)
 	require.NoError(t, err)
 
-	fx.cold.AssertCalled(t, "Enqueue", ctx, testEnv)
+	fx.cold.AssertCalled(t, "Enqueue", ctx, testID, testEnv)
 	fx.hot.AssertNotCalled(t, "Enqueue")
 }
 
@@ -165,14 +165,19 @@ func TestRetrieveBatch_HotHit(t *testing.T) {
 	ctx := context.Background()
 
 	hotResult := []*routing.QueuedMessage{testMsg}
+	// 1. Hot returns 1 message (Limit is 10)
 	fx.hot.On("RetrieveBatch", ctx, testURN, 10).Return(hotResult, nil)
+
+	// 2. Composite logic detects partial batch (1 < 10) and asks Cold for remaining (9)
+	// We mock this to return empty so the test asserts we got the Hot message back.
+	fx.cold.On("RetrieveBatch", ctx, testURN, 9).Return([]*routing.QueuedMessage{}, nil)
 
 	res, err := fx.comp.RetrieveBatch(ctx, testURN, 10)
 	require.NoError(t, err)
 	assert.Equal(t, hotResult, res)
 
 	fx.hot.AssertCalled(t, "RetrieveBatch", ctx, testURN, 10)
-	fx.cold.AssertNotCalled(t, "RetrieveBatch")
+	fx.cold.AssertCalled(t, "RetrieveBatch", ctx, testURN, 9)
 }
 
 func TestRetrieveBatch_ColdHit(t *testing.T) {
@@ -180,9 +185,7 @@ func TestRetrieveBatch_ColdHit(t *testing.T) {
 	ctx := context.Background()
 
 	coldResult := []*routing.QueuedMessage{testMsg}
-	// Hot queue returns empty
 	fx.hot.On("RetrieveBatch", ctx, testURN, 10).Return([]*routing.QueuedMessage{}, nil)
-	// Cold queue returns messages
 	fx.cold.On("RetrieveBatch", ctx, testURN, 10).Return(coldResult, nil)
 
 	res, err := fx.comp.RetrieveBatch(ctx, testURN, 10)
@@ -199,7 +202,7 @@ func TestRetrieveBatch_HotErrorFallback(t *testing.T) {
 
 	coldResult := []*routing.QueuedMessage{testMsg}
 	// Hot queue returns error
-	fx.hot.On("RetrieveBatch", ctx, testURN, 10).Return(nil, testErr)
+	fx.hot.On("RetrieveBatch", ctx, testURN, 10).Return(nil, errTest)
 	// Cold queue returns messages
 	fx.cold.On("RetrieveBatch", ctx, testURN, 10).Return(coldResult, nil)
 
@@ -216,21 +219,13 @@ func TestAcknowledge(t *testing.T) {
 	ctx := context.Background()
 	ids := []string{"msg-1"}
 
-	// Both should be called
 	fx.hot.On("Acknowledge", ctx, testURN, ids).Return(nil)
 	fx.cold.On("Acknowledge", ctx, testURN, ids).Return(nil)
 
 	err := fx.comp.Acknowledge(ctx, testURN, ids)
 	require.NoError(t, err)
 
-	// Need to use Eventually because they run in parallel
-	require.Eventually(t, func() bool {
-		// We can't use AssertCalled in Eventually, so we check mock.Calls
-		hotCalls := fx.hot.Mock.Calls
-		coldCalls := fx.cold.Mock.Calls
-		return len(hotCalls) > 0 && len(coldCalls) > 0
-	}, 1*time.Second, 10*time.Millisecond)
-
+	// Note: We removed Eventually logic for unit testing as these mocks are synchronous
 	fx.hot.AssertCalled(t, "Acknowledge", ctx, testURN, ids)
 	fx.cold.AssertCalled(t, "Acknowledge", ctx, testURN, ids)
 }
@@ -239,8 +234,6 @@ func TestMigrateHotToCold(t *testing.T) {
 	fx := setup(t)
 	ctx := context.Background()
 
-	// Assert that MigrateToCold is called on the hot queue,
-	// and that the cold queue instance is passed to it.
 	fx.hot.On("MigrateToCold", ctx, testURN, fx.cold).Return(nil)
 
 	err := fx.comp.MigrateHotToCold(ctx, testURN)
@@ -253,50 +246,42 @@ func TestEnqueueHot_Fallback_Ephemeral(t *testing.T) {
 	fx := setup(t)
 	ctx := context.Background()
 
-	// Arrange: Ephemeral Envelope
 	ephemeralEnv := &secure.SecureEnvelope{
 		RecipientID: testURN,
 		IsEphemeral: true, // FLAG SET
 	}
 
 	// 1. Hot queue fails
-	fx.hot.On("Enqueue", ctx, ephemeralEnv).Return(testErr)
+	fx.hot.On("Enqueue", ctx, testID, ephemeralEnv).Return(errTest)
 
 	// Act
-	err := fx.comp.EnqueueHot(ctx, ephemeralEnv)
+	err := fx.comp.EnqueueHot(ctx, testID, ephemeralEnv)
 
 	// Assert
-	require.NoError(t, err) // Should succeed
+	require.NoError(t, err) // Should succeed (swallow error)
 
-	// Verify Hot was called
-	fx.hot.AssertCalled(t, "Enqueue", ctx, ephemeralEnv)
-
-	// CRITICAL: Verify Cold was NOT called (Drop Logic)
-	fx.cold.AssertNotCalled(t, "Enqueue", ctx, mock.Anything)
+	fx.hot.AssertCalled(t, "Enqueue", ctx, testID, ephemeralEnv)
+	// CRITICAL: Verify Cold was NOT called
+	fx.cold.AssertNotCalled(t, "Enqueue", ctx, mock.Anything, mock.Anything)
 }
 
 func TestEnqueueHot_Fallback_Persistent(t *testing.T) {
 	fx := setup(t)
 	ctx := context.Background()
 
-	// Arrange: Persistent Envelope
 	persistentEnv := &secure.SecureEnvelope{
 		RecipientID: testURN,
-		IsEphemeral: false, // Default
+		IsEphemeral: false,
 	}
 
 	// 1. Hot queue fails
-	fx.hot.On("Enqueue", ctx, persistentEnv).Return(testErr)
-	// 2. Cold queue succeeds
-	fx.cold.On("Enqueue", ctx, persistentEnv).Return(nil)
+	fx.hot.On("Enqueue", ctx, testID, persistentEnv).Return(errTest)
+	// 2. Cold queue succeeds with SAME ID
+	fx.cold.On("Enqueue", ctx, testID, persistentEnv).Return(nil)
 
-	// Act
-	err := fx.comp.EnqueueHot(ctx, persistentEnv)
-
-	// Assert
+	err := fx.comp.EnqueueHot(ctx, testID, persistentEnv)
 	require.NoError(t, err)
 
-	// Verify Fallback Logic
-	fx.hot.AssertCalled(t, "Enqueue", ctx, persistentEnv)
-	fx.cold.AssertCalled(t, "Enqueue", ctx, persistentEnv)
+	fx.hot.AssertCalled(t, "Enqueue", ctx, testID, persistentEnv)
+	fx.cold.AssertCalled(t, "Enqueue", ctx, testID, persistentEnv)
 }

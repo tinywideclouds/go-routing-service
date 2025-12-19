@@ -1,16 +1,14 @@
-/*
-File: internal/api/routing_handlers_test.go
-Description: Unit tests for the routing service API handlers.
-*/
+// --- File: internal/api/routing_handlers_test.go ---
 package api_test
 
 import (
+	"bytes" // Changed strings to bytes for Marshal
 	"context"
+	"encoding/json" // Added json
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,7 +23,6 @@ import (
 
 const defaultBatchLimit = 50
 
-// --- Mocks (Same as before) ---
 type mockIngestionProducer struct{ mock.Mock }
 
 func (m *mockIngestionProducer) Publish(ctx context.Context, envelope *secure.SecureEnvelope) error {
@@ -34,11 +31,11 @@ func (m *mockIngestionProducer) Publish(ctx context.Context, envelope *secure.Se
 
 type mockMessageQueue struct{ mock.Mock }
 
-func (m *mockMessageQueue) EnqueueHot(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	return m.Called(ctx, envelope).Error(0)
+func (m *mockMessageQueue) EnqueueHot(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	return m.Called(ctx, messageID, envelope).Error(0)
 }
-func (m *mockMessageQueue) EnqueueCold(ctx context.Context, envelope *secure.SecureEnvelope) error {
-	return m.Called(ctx, envelope).Error(0)
+func (m *mockMessageQueue) EnqueueCold(ctx context.Context, messageID string, envelope *secure.SecureEnvelope) error {
+	return m.Called(ctx, messageID, envelope).Error(0)
 }
 func (m *mockMessageQueue) RetrieveBatch(ctx context.Context, userURN urn.URN, limit int) ([]*routing.QueuedMessage, error) {
 	args := m.Called(ctx, userURN, limit)
@@ -59,15 +56,12 @@ func (m *mockMessageQueue) MigrateHotToCold(ctx context.Context, userURN urn.URN
 var (
 	testLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Identity
 	authedUserID     = "urn:auth:google:123"
 	authedUserURN, _ = urn.Parse(authedUserID)
 
-	// Handle
 	authedHandle       = "urn:lookup:email:test@test.com"
 	authedHandleURN, _ = urn.Parse(authedHandle)
 
-	// Contexts
 	ctxWithIdentity = middleware.ContextWithUser(context.Background(), authedUserID, "", "")
 	ctxWithHandle   = middleware.ContextWithUser(context.Background(), authedUserID, authedHandle, "")
 )
@@ -95,11 +89,10 @@ func TestGetMessageBatchHandler_HandleIsKing(t *testing.T) {
 		queue := new(mockMessageQueue)
 		apiHandler := api.NewAPI(nil, queue, testLogger)
 
-		// EXPECTATION: RetrieveBatch is called with the HANDLE URN
 		queue.On("RetrieveBatch", mock.Anything, authedHandleURN, defaultBatchLimit).Return(testBatch, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/messages", nil)
-		req = req.WithContext(ctxWithHandle) // Context has both, should prefer Handle
+		req = req.WithContext(ctxWithHandle)
 		rr := httptest.NewRecorder()
 
 		apiHandler.GetMessageBatchHandler(rr, req)
@@ -112,11 +105,10 @@ func TestGetMessageBatchHandler_HandleIsKing(t *testing.T) {
 		queue := new(mockMessageQueue)
 		apiHandler := api.NewAPI(nil, queue, testLogger)
 
-		// EXPECTATION: RetrieveBatch is called with the IDENTITY URN
 		queue.On("RetrieveBatch", mock.Anything, authedUserURN, defaultBatchLimit).Return(testBatch, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/messages", nil)
-		req = req.WithContext(ctxWithIdentity) // Context has only Identity
+		req = req.WithContext(ctxWithIdentity)
 		rr := httptest.NewRecorder()
 
 		apiHandler.GetMessageBatchHandler(rr, req)
@@ -127,24 +119,33 @@ func TestGetMessageBatchHandler_HandleIsKing(t *testing.T) {
 }
 
 func TestAcknowledgeMessagesHandler_HandleIsKing(t *testing.T) {
-	ackBody := `{"messageIds": ["id-1"]}`
 	expectedIDs := []string{"id-1"}
+
+	// Create request body struct to ensure valid JSON
+	reqBody := struct {
+		MessageIDs []string `json:"messageIds"`
+	}{
+		MessageIDs: expectedIDs,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	require.NoError(t, err)
 
 	t.Run("Success - Acks using HANDLE when present", func(t *testing.T) {
 		queue := new(mockMessageQueue)
 		apiHandler := api.NewAPI(nil, queue, testLogger)
 
-		// EXPECTATION: Acknowledge called with HANDLE URN
+		// Expectation: Context, URN, IDs
 		queue.On("Acknowledge", mock.Anything, authedHandleURN, expectedIDs).Return(nil)
 
-		req := httptest.NewRequest(http.MethodPost, "/api/messages/ack", strings.NewReader(ackBody))
+		req := httptest.NewRequest(http.MethodPost, "/api/messages/ack", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json") // Explicitly set content type
 		req = req.WithContext(ctxWithHandle)
 		rr := httptest.NewRecorder()
 
 		apiHandler.AcknowledgeMessagesHandler(rr, req)
 
 		assert.Equal(t, http.StatusNoContent, rr.Code)
-		apiHandler.Wait()
+		apiHandler.Wait() // Block until background task finishes
 		queue.AssertExpectations(t)
 	})
 }
